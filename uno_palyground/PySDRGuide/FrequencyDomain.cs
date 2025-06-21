@@ -4,7 +4,7 @@ using ScottPlot;
 using Spectrogram;
 
 // https://pysdr.org/content/frequency_domain.html
-public class FrequencyDomain : Page
+public class FrequencyDomain 
 {
     private readonly Plot _plot;
     public FrequencyDomain(Plot plot)

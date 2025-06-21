@@ -16,13 +16,20 @@ public sealed partial class MainPage : Page
     {
         this.InitializeComponent();
 
-        var freqDomainLab = new FrequencyDomain(WinUIPlot1.Plot);
+        //var freqDomainLab = new FrequencyDomain(WinUIPlot1.Plot);
         //freqDomainLab.PopulateFrequency();
         // freqDomainLab.DrawSpectogram();
-        freqDomainLab.FFTSimulation();
+        // freqDomainLab.FFTSimulation();
+        //var iqSampling = new IQSampling(WinUIPlot1.Plot);
+        //iqSampling.CalculatePowerDpectralDensity();
+
+        var d =new DigitalModulation(WinUIPlot1.Plot);
+        d.QPSK();
         WinUIPlot1.Refresh();
 
+ 
         //Image1.Source = path;
+        
 
         /* WinUIPlot1.Plot.YLabel("Power");
                     WinUIPlot1.Plot.XLabel("Frequency (Hz)");

@@ -38,3 +38,13 @@ dotnet add package FftSharp
 
 Show serial number:
 `hackrf_info` 
+
+# Numpy.Net  SciSharp
+
+https://github.com/SciSharp/Numpy.NET 
+
+```
+Python	C#
+//	    floordiv()
+**	    pow()
+```
