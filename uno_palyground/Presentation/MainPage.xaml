@@ -11,16 +11,15 @@
   <ScrollViewer IsTabStop="True">
     <Grid utu:SafeArea.Insets="VisibleBounds">
       <Grid.RowDefinitions>
-        <RowDefinition Height="Auto" />
-         <RowDefinition Height="*" />
-         <RowDefinition Height="*" />
-        <RowDefinition />
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
       </Grid.RowDefinitions>
-      <utu:NavigationBar Content="{Binding Title}" />
-      <ScottPlot:WinUIPlot x:Name="WinUIPlot1" Grid.Row="1" />  
-      <Grid utu:SafeArea.Insets="VisibleBounds" Grid.Row="2" >
-        <Image x:Name="Image1"  Stretch="Uniform"/>
-        </Grid>
+      <utu:NavigationBar Content="{Binding Title}"/>
+      <ScottPlot:WinUIPlot x:Name="WinUIPlot1"
+                           Grid.Row="1"/>
+      <!-- <Grid utu:SafeArea.Insets="VisibleBounds" Grid.Row="2" >
+       <Image x:Name="Image1"  Stretch="Uniform"/>
+        </Grid>-->
       <!--<StackPanel Grid.Row="3"
             HorizontalAlignment="Center"
             VerticalAlignment="Center"
