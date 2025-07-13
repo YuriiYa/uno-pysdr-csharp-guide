@@ -36,8 +36,21 @@ dotnet add package FftSharp
     2-10   8087:0026  Intel(R) Wireless Bluetooth(R)  
 ```
 
-Show serial number:
+- Show serial number:
 `hackrf_info` 
+
+- Gain stages
+
+ - Receive side:
+
+   - RF (amp, either 0 or 11 dB) - It amplifies all incoming signals, including noise and strong signals
+   - IF (lna, 0 to 40 dB in 8 dB steps) - Low Noise Amplifier. The IF (Intermediate Frequency) gain is applied after the RF (Radio Frequency) signal is received and downconverted from the antenna, but before the signal is digitized by the ADC (Analog-to-Digital Converter). For maximizing signal-to-noise ratio (SNR) without causing distortion or saturation. 
+   - baseband (vga, 0 to 62 dB in 2 dB steps) - It mostly amplifies the signal after it has already been filtered and digitized, so it can be set relatively high 
+
+ - Transmit side:
+ 
+   - RF [either 0 or 11 dB]
+   - IF [0 to 47 dB in 1 dB steps]
 
 # Numpy.Net  SciSharp
 

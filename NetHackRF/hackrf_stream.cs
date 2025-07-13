@@ -33,14 +33,15 @@ namespace nethackrf
             try
             {
                 event_sem.Release();
-            } catch (SemaphoreFullException)
+            }
+            catch (SemaphoreFullException)
             {
 
             }
         }
         private void get_event() // waiting for event from hackrf.dll. If nothing happens in 5 seconds than the method throws exception
         {
-            if(event_sem.WaitOne(5000) == false) throw new TimeoutException("timeout occured while trying to access hackRF stream");
+            if (event_sem.WaitOne(5000) == false) throw new TimeoutException("timeout occured while trying to access hackRF stream");
         }
         unsafe internal int StreamCallback(libhackrf.hackrf_transfer* transfer) // hackrf.dll calls this method to exchange data with device
         {
@@ -60,7 +61,8 @@ namespace nethackrf
                 }
                 buffer_semaphore.Release();
                 set_event();
-            } else if(device.mode == NetHackrf.transceiver_mode_t.TX)
+            }
+            else if (device.mode == NetHackrf.transceiver_mode_t.TX)
             {
                 buffer_semaphore.WaitOne();
                 for (int i = 0; i < transfer->valid_length; i++)
@@ -112,11 +114,15 @@ namespace nethackrf
 
         public override bool CanSeek { get => false; }
 
-        public override long Length { get {
+        public override long Length
+        {
+            get
+            {
                 int ret = write_pos - read_pos;
                 if (ret < 0) ret += stream_buffer.Length;
                 return ret;
-            } }
+            }
+        }
 
         public override long Position { get => throw new NotImplementedException(); set => throw new NotImplementedException(); }
 
@@ -136,9 +142,10 @@ namespace nethackrf
 
         public override int Read(byte[] buffer, int offset = 0, int count = -1) // implementation of Stream.Read(...) method
         {
+            int readAllCountData = 0;
             if (disposed) throw new EndOfStreamException();
             if (count < 0) count = buffer.Length;
-            if ( device.mode == NetHackrf.transceiver_mode_t.RX)
+            if (device.mode == NetHackrf.transceiver_mode_t.RX)
             {
                 if (count > stream_buffer.Length / 2) // if needed data length is bigger than half of buffer size then transfer should be devided into smaller parts
                 {
@@ -146,16 +153,17 @@ namespace nethackrf
                     int curpos = 0;
                     do
                     {
-                        Read(buffer, curpos, blocksize);
+                        readAllCountData += Read(buffer, curpos, blocksize);
                         count -= blocksize;
                         curpos += blocksize;
-                        if ( count < blocksize)
+                        if (count < blocksize)
                         {
                             blocksize = count;
                         }
                     } while (count > 0);
-                    return 0;
-                } else
+                    return readAllCountData;
+                }
+                else
                 {
                     int avail;
                     do
@@ -163,19 +171,26 @@ namespace nethackrf
                         if (!device.IsStreaming) throw new IOException("HackRF is not streaming data!");
                         avail = write_pos - read_pos;
                         if (avail < 0) avail += stream_buffer.Length;
-                        if ( avail < count ) get_event(); // waiting for next callback to lower cpu usage
+                        if (avail < count) get_event(); // waiting for next callback to lower cpu usage
                     } while (avail < count); // waiting for required data amount in buffer
                     buffer_semaphore.WaitOne();
                     for (int i = 0; i < count; i++) // reading data from stream buffer
                     {
                         buffer[i + offset] = stream_buffer[read_pos];
                         read_pos++;
-                        if (read_pos >= stream_buffer.Length) read_pos = 0;
+                        if (read_pos >= stream_buffer.Length)
+                        {
+                            // It's a data structure that uses a single, fixed-size buffer as if it were connected end-to-end. 
+                            // When the read or write pointer reaches the end of the buffer, it wraps around to the beginning. This is highly efficient for streaming data because it avoids reallocating memory.
+                            read_pos = 0;
+                        }
                     }
+                    readAllCountData += count;
                     buffer_semaphore.Release();
                 }
-                return 0;
-            } else
+                return readAllCountData;
+            }
+            else
             {
                 throw new NotImplementedException();
             }
@@ -183,7 +198,7 @@ namespace nethackrf
         public byte[] Read(int count)
         {
             byte[] ret = new byte[count];
-            Read(ret, 0, count);
+            _ = Read(ret, 0, count);
             return ret;
         }
         public override long Seek(long offset, SeekOrigin origin)

@@ -13,13 +13,13 @@
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="*"/>
+        <RowDefinition Height="3*"/>
       </Grid.RowDefinitions>
       <utu:NavigationBar Content="{Binding Title}"/>
-      <ScottPlot:WinUIPlot x:Name="WinUIPlot1"
+      <ScottPlot:WinUIPlot x:Name="WinUIPlotModulation"
                            Grid.Row="1"/>
-      <!-- <Grid utu:SafeArea.Insets="VisibleBounds" Grid.Row="2" >
-       <Image x:Name="Image1"  Stretch="Uniform"/>
-        </Grid>-->
+      <ScottPlot:WinUIPlot x:Name="WinUIPlot1"
+                           Grid.Row="2"/>
       <!--<StackPanel Grid.Row="3"
             HorizontalAlignment="Center"
             VerticalAlignment="Center"
