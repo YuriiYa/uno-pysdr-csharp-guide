@@ -47,6 +47,5 @@ public class IQSampling
         _plot.YLabel("Magnitude [dB]");
         _plot.XLabel("Frequency [Hz]");
         _plot.ShowGrid();
-
     }
 }

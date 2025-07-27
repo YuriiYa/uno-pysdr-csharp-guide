@@ -17,8 +17,8 @@ public sealed partial class MainPage : Page
         this.InitializeComponent();
 
         // https://github.com/ScottPlot/ScottPlot/blob/main/src/ScottPlot5/ScottPlot5%20Demos/ScottPlot5%20WinForms%20Demo/Demos/SharedAxes.cs
-        WinUIPlot1.Plot.Axes.Link(WinUIPlotModulation.Plot, x: true, y: false);
-        WinUIPlotModulation.Plot.Axes.Link(WinUIPlot1.Plot, x: true, y: false);
+        // WinUIPlot1.Plot.Axes.Link(WinUIPlotModulation.Plot, x: true, y: false);
+        // WinUIPlotModulation.Plot.Axes.Link(WinUIPlot1.Plot, x: true, y: false);
 
         //var freqDomainLab = new FrequencyDomain(WinUIPlot1.Plot);
         //freqDomainLab.PopulateFrequency();
@@ -31,9 +31,15 @@ public sealed partial class MainPage : Page
          d.QPSK();
          WinUIPlot1.Refresh();
  */
-        var d = new HackRF.Namespace.HackRF(WinUIPlot1.Plot, DispatcherQueue, WinUIPlotModulation.Plot);
+        /*var d = new HackRF.Namespace.HackRF(WinUIPlot1.Plot, DispatcherQueue, WinUIPlotModulation.Plot);
         d.GetAndVisualizeHackRFData(new HackRFInteraction());
-        WinUIPlot1.Refresh();
+        WinUIPlot1.Refresh();*/
+        //var noise = new Noise(WinUIPlot1.Plot, WinUIPlotModulation.Plot);
+        // noise.GaussianNoise();
+        //noise.ComplexNoise();
+
+        var videoFileExample = new VideoFromFile(WinUIPlot1.Plot, WinUIPlotModulation.Plot);
+        videoFileExample.DoShowVideoFile();
     }
 
 }

@@ -69,7 +69,7 @@ public class HackRF
             //var samples = Numpy.np.array(values)["100000:"]; // get rid of the first 100k samples just to be safe, due to transients
             var samples = Numpy.np.array(values);
 
-            var fft_size = 2048;
+            var fft_size = 2048 * 16;
             int num_rows = samples.len / fft_size;
             var spectrogram = Numpy.np.zeros((num_rows, fft_size));
 
@@ -115,11 +115,9 @@ public class HackRF
 
             _plot.Axes.MarginsX(0.1);
 
-            // double[] freq = FftSharp.FFT.FrequencyScale(spectrogram["-1"].len, _configuration.SampleFrequency);
             double[] freq = Numpy.np.arange(left, right, (right - left) / spectrogram["-1"].len).GetData<double>();
 
             _plotModulation.Add.SignalXY(freq, spectrogram["-1"].real.GetData<double>());
-            //_plotModulation.Add.SignalXY(freq, power.imag.GetData<double>());
             _plotModulation.YLabel("Power");
             _plotModulation.XLabel("Frequency (Hz)");
             _plotModulation.Axes.SetLimitsX(left, right);
@@ -127,6 +125,9 @@ public class HackRF
             PixelPadding padding = new(50, 20, 30, 5);
             _plot.Layout.Fixed(padding);
             _plotModulation.Layout.Fixed(padding);
+
+            _plot.Axes.Link(_plotModulation, x: true, y: false);
+            _plotModulation.Axes.Link(_plot, x: true, y: false);
 
             _plotModulation.Axes.AutoScale();
             _plot.Axes.AutoScale();
