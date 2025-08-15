@@ -44,13 +44,15 @@ sample_rate = fs  # This should be 10 MHz from your wav.read()
 
 # Apply window function to reduce spectral leakage
 windowed_samples = batch_samples * np.hanning(len(batch_samples))
+center_freq = 179100000  # Hz
+
 
 # Apply FFT to convert to frequency domain
 fft_result = np.fft.fft(windowed_samples)
 fft_shifted = np.fft.fftshift(fft_result)  # Center the spectrum
 
 # Calculate frequency bins relative to center frequency (179.1 MHz)
-center_freq = 179100000  # Hz
+
 freqs = np.fft.fftshift(np.fft.fftfreq(batch_size, 1/sample_rate))
 actual_freqs = center_freq + freqs  # Actual RF frequencies
 
@@ -74,3 +76,13 @@ print(f"Batch size: {batch_size} samples")
 print(f"Frequency resolution: {sample_rate/batch_size/1000:.1f} kHz")
 print(f"Center frequency: {center_freq/1e6} MHz")
 print(f"Frequency range: {(center_freq-sample_rate/2)/1e6:.1f} to {(center_freq+sample_rate/2)/1e6:.1f} MHz")
+
+num_rows = len(windowed_samples) // batch_size # // is an integer division which rounds down
+spectrogram = np.zeros((num_rows, batch_size))
+for i in range(num_rows):
+    spectrogram[i,:] = 10*np.log10(np.abs(np.fft.fftshift(np.fft.fft(windowed_samples[i*batch_size:(i+1)*batch_size])))**2)
+
+plt.imshow(spectrogram, aspect='auto', extent = [sample_rate/-2/1e6, sample_rate/2/1e6, len(windowed_samples)/sample_rate, 0])
+plt.xlabel("Frequency [MHz]")
+plt.ylabel("Time [s]")
+plt.show()

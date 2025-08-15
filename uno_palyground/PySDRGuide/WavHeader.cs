@@ -25,7 +25,7 @@ using System.Runtime.InteropServices;
         // (Sample Rate * BitsPerSample * Channels) / 8.
         public Int32 AverageBytePerSecond;
         // (BitsPerSample * Channels) / 8.1 - 8 bit mono2 - 8 bit stereo/16 bit mono4 - 16 bit stereo
-        Int16 BlockAlign;
+        public Int16 BlockAlign;
         // Bits per sample
         public Int16 AudioBitPerSample;
         //“data” chunk header. Marks the beginning of the data section.

@@ -3,6 +3,23 @@ using System.Runtime.InteropServices;
 
 public class WavHelper
 {
+    public static void PrintWavHeader(WavHeader header)
+    {
+        Console.WriteLine($"FileMark: {header.FileMark}");
+        Console.WriteLine($"FileSize: {header.Size}");
+        Console.WriteLine($"Format: {header.FileFormat}");
+        Console.WriteLine($"ChunkMarker: {header.ChunkMarker}");
+        Console.WriteLine($"ChankLength: {header.ChankLength}");
+        Console.WriteLine($"AudioFormat: {header.AudioFormat}");
+        Console.WriteLine($"Channels: {header.Channels}");
+        Console.WriteLine($"SampleRate: {header.SampleRate}");
+        Console.WriteLine($"AverageBytePerSecond: {header.AverageBytePerSecond}");
+        Console.WriteLine($"BlockAlign: {header.BlockAlign}");
+        Console.WriteLine($"AudioBitPerSample: {header.AudioBitPerSample}");
+        Console.WriteLine($"Data: {header.Data}");
+        Console.WriteLine($"DataFileSize: {header.DataFileSize}");
+    }
+
     public static TType? ConvertByteArraytoType<TType>(Int16[] int16Header)
     {
         byte[] byteHeader = new byte[int16Header.Length * sizeof(Int16)];

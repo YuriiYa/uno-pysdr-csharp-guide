@@ -14,7 +14,7 @@ public class VideoFromFile
         _plotModulation = plotModulation;
     }
 
-    static Complex[] ConvertToIQ(Int16[] data)
+    public static Complex[] ConvertToIQ(Int16[] data)
     {
         var halfLength = data.Length / 2;
         Complex[] ret = new Complex[halfLength];
@@ -45,7 +45,7 @@ public class VideoFromFile
 
         var sample_rate = header.SampleRate;
         var center_freq = 179100000;
-        double CenterFreqinMHz = center_freq / 1e6;
+        double CenterFreqinMHz = center_freq ;
 
         // Take one batch of samples equivalent to 8 MHz bandwidth
         // For proper frequency resolution, use a power of 2 that covers the bandwidth well
@@ -62,25 +62,71 @@ public class VideoFromFile
         // Convert to power spectral density (magnitude squared, in dB)
         var psd = 20 * Numpy.np.log10(Numpy.np.abs(fft_shifted) + 1e-12);  // Add small value to avoid log(0)
                                                                            // Define the heatmap's boundaries using its Extent
-        var left = CenterFreqinMHz + sample_rate / (-2.0) / 1e6;
-        var right = CenterFreqinMHz + sample_rate / 2.0 / 1e6;
-        //var bottom = 0;
-       // var top = samples.len / ((double)sample_rate / 1e6);
+        var left = CenterFreqinMHz + sample_rate / (-2.0) ;
+        var right = CenterFreqinMHz + sample_rate / 2.0 ;
 
-        //double[] freq = Numpy.np.arange(left, right, (right - left) / psd.len).GetData<double>();
+        int num_rows = samples.len / batch_size;
+        var spectrogram = Numpy.np.zeros((num_rows, batch_size));
+
+        for (int i = 0; i < num_rows; i++)
+            spectrogram[$"{i}, :"] = 10 * Numpy.np.log10(
+                (
+                    Numpy.np.abs(
+                        Numpy.np.fft.fftshift(
+                            Numpy.np.fft.fft_(
+                                //  Apply window function to reduce spectral leakage
+                                samples[$"{i * batch_size}:{(i + 1) * batch_size}"] * Numpy.np.hanning(batch_size)
+                        )
+                    ) + 1e-12 // Add small value to avoid log(0)
+                )
+                ).pow(2));
+
+        int numRows = spectrogram.shape[0];
+        int numCols = spectrogram.shape[1];
+        double[] flat = spectrogram.GetData<double>();
+        double[,] spectrogramArray = new double[numRows, numCols];
+        for (int i = 0; i < numRows; i++)
+            for (int j = 0; j < numCols; j++)
+                spectrogramArray[i, j] = flat[i * numCols + j];
+
+        var hm = _plot.Add.Heatmap(spectrogramArray);
+        _plot.YLabel("Time (s)");
+        _plot.XLabel("Frequency (Hz)");
+
+        // Define the heatmap's boundaries using its Extent
+        var bottom = 0;
+        var top = samples.len / ((double)sample_rate / 1e6);
+
+        hm.Extent = new ScottPlot.CoordinateRect(
+            left: left,
+            right: right,
+            bottom: bottom,
+            top: top
+         );
 
         _plotModulation.Add.SignalXY(actual_freqs.GetData<double>(), psd.real.GetData<double>());
         _plotModulation.YLabel("Power");
         _plotModulation.XLabel("Frequency (Hz)");
         _plotModulation.Axes.SetLimitsX(left, right);
-        _plotModulation.Axes.AutoScale();
+
+        _plot.Axes.InvertY();
+        _plot.Axes.SetLimitsX(left, right);
+        //_plot.Axes.SetLimitsY(bottom, top);
+        _plot.Axes.MarginsX(0.1);
+        _plotModulation.Axes.MarginsX(0.1);
+
+        PixelPadding padding = new(50, 20, 30, 5);
+        _plot.Layout.Fixed(padding);
+        _plotModulation.Layout.Fixed(padding);
+
+
+        _plot.Axes.Link(_plotModulation, x: true, y: false);
+        _plotModulation.Axes.Link(_plot, x: true, y: false);
+        //_plotModulation.Axes.AutoScale();
         _plotModulation.PlotControl?.Refresh();
-
-       /* _plot.Add.Markers(iq_samples[":1000"].real.GetData<Int16>(), iq_samples[":1000"].imag.GetData<Int16>());
-        _plot.YLabel("Power");
-        _plot.XLabel("Frequency (Hz)");
-
         _plot.Axes.AutoScale();
-        _plot.PlotControl?.Refresh();*/
+        _plot.PlotControl?.Refresh();
+
+
     }
 }

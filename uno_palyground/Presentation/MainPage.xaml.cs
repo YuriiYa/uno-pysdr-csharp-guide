@@ -38,8 +38,31 @@ public sealed partial class MainPage : Page
         // noise.GaussianNoise();
         //noise.ComplexNoise();
 
-        var videoFileExample = new VideoFromFile(WinUIPlot1.Plot, WinUIPlotModulation.Plot);
-        videoFileExample.DoShowVideoFile();
+        /*var videoFileExample = new VideoFromFile(WinUIPlot1.Plot, WinUIPlotModulation.Plot);
+        videoFileExample.DoShowVideoFile();*/
+
+        DecodePALVideo(WinUIPlot1.Plot);
+    }
+
+
+    public void DecodePALVideo(Plot plot)
+    {
+        var filename = @"C:\projects\sdr\RFData\SDRSharp_20170122_171736Z_179100000Hz_IQ.wav";
+        var samples = Numpy.np.fromfile(filename, Numpy.np.int16);
+
+        var int16Header = samples[":22"].real.GetData<Int16>();
+        WavHeader header = WavHelper.ConvertByteArraytoType<WavHeader>(int16Header);
+        WavHelper.PrintWavHeader(header);
+
+        samples = samples["22:"]; // Skip WAV header
+
+        var iqSamples = VideoFromFile.ConvertToIQ(samples.real.GetData<Int16>());
+
+        // Initialize PAL decoder
+        var palDecoder = new PALDecoder(plot);
+
+        // Decode PAL signal (assuming 10 MHz sample rate)
+        palDecoder.DecodePALSignal(iqSamples, sampleRate: 10000000);
     }
 
 }
