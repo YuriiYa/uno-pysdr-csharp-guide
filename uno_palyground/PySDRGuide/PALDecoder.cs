@@ -1,5 +1,6 @@
 using ScottPlot;
 using System.Numerics;
+using Microsoft.UI.Dispatching;
 
 // 0 Hz    1 MHz    3 MHz   3.5 MHz 4.43 MHz  5.5 MHz    8 MHz
 // |-------|--------|--------|--------|-------|----------|-------|
@@ -101,105 +102,168 @@ using System.Numerics;
 public class PALDecoder
 {
     private readonly Plot _plot;
+    private readonly DispatcherQueue _dispatcherQueue;
 
     // PAL I specifications
-    private const double PAL_FRAME_RATE = 25.0; // 25 fps
-    private const int PAL_LINES_PER_FRAME = 625;
-    private const int PAL_VISIBLE_LINES = 576;
-    private const double PAL_LINE_DURATION = 64e-6; // 64 microseconds per line
-    private const double PAL_COLOR_CARRIER_FREQ = 4433618.75; // Hz
-    private const double PAL_VIDEO_BANDWIDTH = 5.5e6; // 5.5 MHz
+    public const double PAL_FRAME_RATE = 25.0; // 25 fps
+    public const int PAL_LINES_PER_FRAME = 625;
+    public const int PAL_VISIBLE_LINES = 576;
+    public const double PAL_LINE_DURATION = 64e-6; // 64 microseconds per line
+    public const double PAL_COLOR_CARRIER_FREQ = 4433618.75; // Hz
+    public const double PAL_VIDEO_BANDWIDTH = 5.5e6; // 5.5 MHz
 
-    public PALDecoder(Plot plot)
+    public PALDecoder(Plot plot, DispatcherQueue dispatcherQueue)
     {
         _plot = plot;
+        _dispatcherQueue = dispatcherQueue;
     }
 
     public void DecodePALSignal(Complex[] iqSamples, int sampleRate)
     {
-        // Calculate samples per line
-        int samplesPerLine = (int)(PAL_LINE_DURATION * sampleRate);
+        Task.Factory.StartNew(() =>
+           {
+               int samplesPerLine = (int)(PAL_LINE_DURATION * sampleRate); // 640
+               int samplesPerFrame = samplesPerLine * PAL_LINES_PER_FRAME; //400000
 
-        // Demodulate entire signal first
-        double[] videoSignal = AMDemodulation(iqSamples);
+               double[] videoSignal = AMDemodulation(iqSamples);
+               int frameStart = FindFrameStart(videoSignal, sampleRate, samplesPerLine);
 
-        // Find the start of a frame
-        int frameStart = FindFrameStart(videoSignal, sampleRate, samplesPerLine);
+               if (frameStart + samplesPerFrame > videoSignal.Length)
+               {
+                   Console.WriteLine("Not enough samples for a complete PAL frame after sync");
+                   samplesPerFrame = videoSignal.Length - frameStart;
+               }
 
-        // Extract one complete frame, properly aligned
-        int samplesPerFrame = samplesPerLine * PAL_LINES_PER_FRAME;
-        if (frameStart + samplesPerFrame > videoSignal.Length)
+               double[] frameData = new double[samplesPerFrame];
+               //var skipUntil = frameStart;
+               var skipUntil = (30 + 156) * 2 * samplesPerLine + frameStart;
+               int numberOfFrames = (videoSignal.Length - skipUntil) / samplesPerFrame;
+               for (int i = 0; i < numberOfFrames; i++)
+               {
+                   Array.Copy(videoSignal, skipUntil + i * samplesPerFrame, frameData, 0, samplesPerFrame);
+
+                   // Separate fields
+                   int fieldLines = PAL_VISIBLE_LINES / 2; // 288
+                                                           //int fieldLines = PAL_VISIBLE_LINES / 4 + 10; // 154
+                   double[] field1 = new double[fieldLines * samplesPerLine];
+                   double[] field2 = new double[fieldLines * samplesPerLine];
+
+                   // Field 1: even lines (0,2,4,...)
+                   // Field 2: odd lines (1,3,5,...)
+                   for (int line = 0; line < fieldLines; line++)
+                   {
+                       Array.Copy(frameData, line * 2 * samplesPerLine, field1, line * samplesPerLine, samplesPerLine);
+                       Array.Copy(frameData, (line * 2 + 1) * samplesPerLine, field2, line * samplesPerLine, samplesPerLine);
+                   }
+
+                   // Process each field
+                   var (lum1, chr1) = SeparateLumaChroma(field1, sampleRate, samplesPerLine);
+                   var (lum2, chr2) = SeparateLumaChroma(field2, sampleRate, samplesPerLine);
+
+                   var (u1, v1) = DecodeChroma(chr1, sampleRate);
+                   var (u2, v2) = DecodeChroma(chr2, sampleRate);
+
+                   // Interleave fields for display
+                   byte[,,] rgbFrame = InterleaveFields(
+                       ConvertYUVToRGB_BT601_Optimized(lum1, u1, v1, samplesPerLine),
+                       ConvertYUVToRGB_BT601_Optimized(lum2, u2, v2, samplesPerLine)
+                   );
+
+                   DisplayVideoFrame(rgbFrame);
+
+               }
+           }, TaskCreationOptions.LongRunning);
+    }
+
+    // Interleave two fields into a single frame (PAL interlacing)
+    private byte[,,] InterleaveFields(byte[,,] field1, byte[,,] field2)
+    {
+        int fieldLines = field1.GetLength(0);
+        int width = field1.GetLength(1);
+        int height = PAL_VISIBLE_LINES; // Only visible lines
+        //int height = (PAL_VISIBLE_LINES / 4 + 10) * 2;
+        byte[,,] frame = new byte[height, width, 3];
+
+        int outLine = 0;
+        for (int i = 0; i < fieldLines && outLine < height - 1; i++)
         {
-            Console.WriteLine("Not enough samples for a complete PAL frame after sync");
-            samplesPerFrame = videoSignal.Length - frameStart;
+            for (int j = 0; j < width; j++)
+            {
+                for (int c = 0; c < 3; c++)
+                {
+                    frame[outLine, j, c] = field1[i, j, c];     // Even lines
+                    frame[outLine + 1, j, c] = field2[i, j, c]; // Odd lines
+                }
+            }
+            outLine += 2;
         }
-
-        double[] frameData = new double[samplesPerFrame];
-        Array.Copy(videoSignal, frameStart, frameData, 0, samplesPerFrame);
-
-        // Process this properly aligned frame
-        var (luminance, chrominance) = SeparateLumaChroma(frameData, sampleRate, samplesPerLine);
-        var (uComponent, vComponent) = DecodeChroma(chrominance, sampleRate);
-
-        // Use the BT.601 standard for PAL (not BT.709)
-        byte[,,] rgbFrame = ConvertYUVToRGB_BT601_Optimized(luminance, uComponent, vComponent, samplesPerLine);
-
-        // Display the frame
-        DisplayVideoFrame(rgbFrame);
+        return frame;
     }
 
     private int FindFrameStart(double[] videoSignal, int sampleRate, int samplesPerLine)
     {
+        return 320;
         Console.WriteLine("Searching for frame start...");
 
-        var frameData = new (double index, double value)[2 * samplesPerLine];
-        for (int i = 0; i < 2 * samplesPerLine; i++)
+        /* var frameData = new (double index, double value)[2 * samplesPerLine];
+         for (int i = 0; i < 2 * samplesPerLine; i++)
+         {
+             frameData[i] = (i, videoSignal[i]);
+         }
+         frameData = frameData.OrderBy(x => x.value).ToArray();
+
+         foreach (var frame in frameData)
+         {
+             Console.WriteLine($"{frame.value}:{frame.index}");
+         }*/
+
+        int searchLength = sampleRate; // Search up to 1 second
+        double syncThreshold = videoSignal.Take(searchLength).Min() * 0.5;
+
+        int broadPulseMinDuration = (int)(20e-6 * sampleRate); // Broad pulses are > 20µs
+
+        for (int i = 0; i < searchLength - 5 * samplesPerLine; i++)
         {
-            frameData[i] = (i, videoSignal[i]);
-        }
-        frameData = frameData.OrderBy(x => x.value).ToArray();
-
-        foreach (var frame in frameData)
-        {
-            Console.WriteLine($"{frame.value}:{frame.index}");
-        }
-
-        // PAL vertical sync has a specific pattern of longer-than-normal sync pulses
-        int searchLength = sampleRate / 10; // Search through 1/10 second of signal
-
-        // First, normalize the signal for easier detection
-        double minVal = videoSignal.Take(searchLength).Min();
-        double threshold = minVal * 0.7; // Sync pulses are the most negative parts
-
-        // Look for vertical sync pattern - sequence of wide pulses
-        for (int i = 0; i < searchLength - samplesPerLine; i++)
-        {
-            // Detect potential sync pulse (very negative values)
-            if (videoSignal[i] < threshold)
+            // Is this sample a potential start of a sync pulse?
+            if (videoSignal[i] > syncThreshold && videoSignal[i + 1] < syncThreshold)
             {
-                // Check for consistent sync pattern over multiple lines
-                bool isSyncPattern = true;
-                for (int j = 1; j < 5; j++) // Check next few pulses
+                int pulseStart = i + 1;
+                int pulseEnd = pulseStart;
+                while (pulseEnd < videoSignal.Length && videoSignal[pulseEnd] < syncThreshold)
                 {
-                    int expectedPos = i + j * samplesPerLine;
-                    if (expectedPos >= videoSignal.Length || videoSignal[expectedPos] > threshold)
+                    pulseEnd++;
+                }
+
+                int pulseDuration = pulseEnd - pulseStart;
+
+                // Check if we found a long "broad pulse" from the vertical sync pattern
+                if (pulseDuration > broadPulseMinDuration)
+                {
+                    // A real VBI has a sequence of these. Check for another one nearby.
+                    int nextPulseStart = pulseEnd;
+                    while (nextPulseStart < videoSignal.Length && videoSignal[nextPulseStart] > syncThreshold)
                     {
-                        isSyncPattern = false;
-                        break;
+                        nextPulseStart++;
+                    }
+
+                    if (nextPulseStart < videoSignal.Length && videoSignal[nextPulseStart] < syncThreshold)
+                    {
+                        // Found the start of a second pulse. This is very likely the VBI.
+                        // The active video for the first field starts ~22.5 lines after the VBI starts.
+                        int frameStartOffset = (int)(22.5 * samplesPerLine);
+                        int frameStart = pulseStart + frameStartOffset;
+
+                        Console.WriteLine($"VBI broad pulse detected at sample {pulseStart}. Calculated frame start: {frameStart}");
+                        return frameStart;
                     }
                 }
-
-                if (isSyncPattern)
-                {
-                    return 320;
-                    Console.WriteLine($"Frame start found at sample {i}");
-                    return i;
-                }
+                // Skip ahead to the end of the pulse we just checked
+                i = pulseEnd;
             }
         }
 
-        Console.WriteLine("Could not find frame start, using default");
-        return 0; // Default to beginning if no sync found
+        Console.WriteLine("Could not find VBI pattern, using default of 0.");
+        return 0;
     }
 
     private double[] AMDemodulation(Complex[] iqSamples)
@@ -244,23 +308,28 @@ public class PALDecoder
         double[] uComponent = new double[chrominance.Length];
         double[] vComponent = new double[chrominance.Length];
 
-        // Generate color subcarrier references
-        double dt = 1.0 / sampleRate;
+        int samplesPerLine = (int)(PAL_LINE_DURATION * sampleRate);
+        var pll = new ColorPll(sampleRate);
 
         for (int i = 0; i < chrominance.Length; i++)
         {
-            double t = i * dt;
+            int lineNumber = i / samplesPerLine;
+            int sampleInLine = i % samplesPerLine;
+
+            // The V-axis phase is inverted on every other line
+            bool isVInverted = (lineNumber % 2 != 0);
+
+            // Get the stable, phase-locked reference carrier from the PLL
+            var referenceCarrier = pll.GetReference(new Complex(chrominance[i], 0), sampleInLine, isVInverted);
+            // Demodulate using the PLL's reference
+            var demodulatedSample = new Complex(chrominance[i], 0) * Complex.Conjugate(referenceCarrier);
+
 
             // U demodulation (in-phase with subcarrier)
-            double uRef = Math.Cos(2 * Math.PI * PAL_COLOR_CARRIER_FREQ * t);
-            uComponent[i] = chrominance[i] * uRef;
+            uComponent[i] = demodulatedSample.Real;
 
-            // V demodulation (quadrature with subcarrier) 
-            // PAL alternates V phase every line  "Phase Alternating Line".
-            int lineNumber = i / (int)(PAL_LINE_DURATION * sampleRate); // determines which horizontal line the current sample belongs to.
-            double vPhase = (lineNumber % 2 == 0) ? Math.PI / 2 : -Math.PI / 2; // It checks if the line number is even or odd and inverts the phase of the V-component reference signal accordingly (+90° on one line, -90° on the next).
-            double vRef = Math.Cos(2 * Math.PI * PAL_COLOR_CARRIER_FREQ * t + vPhase);
-            vComponent[i] = chrominance[i] * vRef;
+            // For V, we must respect the PAL switch. We flip the sign back on inverted lines.
+            vComponent[i] = isVInverted ? -demodulatedSample.Imaginary : demodulatedSample.Imaginary;
         }
 
         // Demodulated U & V Components:
@@ -486,35 +555,106 @@ public class PALDecoder
 
     private void DisplayVideoFrame(byte[,,] rgbFrame)
     {
-        int height = rgbFrame.GetLength(0);
-        int width = rgbFrame.GetLength(1);
+        _dispatcherQueue.TryEnqueue(() =>
+       {
+           int height = rgbFrame.GetLength(0);
+           int width = rgbFrame.GetLength(1);
 
-        // Convert to format suitable for ScottPlot
-        double[,] grayScale = new double[height, width];
+           // Convert to format suitable for ScottPlot
+           double[,] grayScale = new double[height, width];
 
-        for (int row = 0; row < height; row++)
+           for (int row = 0; row < height; row++)
+           {
+               for (int col = 0; col < width; col++)
+               {
+                   // Use the original order (no horizontal flip)
+                   double gray = 0.299 * rgbFrame[row, col, 0] +
+                                 0.587 * rgbFrame[row, col, 1] +
+                                 0.114 * rgbFrame[row, col, 2];
+                   grayScale[row, col] = gray;
+               }
+           }
+
+           _plot.Clear();
+           var hm = _plot.Add.Heatmap(grayScale);
+           hm.Colormap = new ScottPlot.Colormaps.Grayscale();
+
+           _plot.XLabel("Pixel");
+           _plot.YLabel("Line");
+           _plot.Title("PAL Video Frame");
+           _plot.Axes.SetLimitsX(0, width);
+           _plot.Axes.SetLimitsY(0, height);
+           _plot.PlotControl?.Refresh();
+
+           Console.WriteLine($"Decoded PAL frame: {width}x{height} pixels");
+       });
+
+    }
+}
+
+
+// This class implements a Phase-Locked Loop (PLL) to recover a stable color subcarrier
+// that is phase-aligned with the incoming signal's color burst.
+public class ColorPll
+{
+    private readonly double _sampleRate;
+    private readonly double _lineDuration;
+    private readonly double _burstStartTime; // Time after H-sync where burst starts
+    private readonly double _burstDuration;  // Duration of the color burst
+
+    // PLL state variables
+    private double _phase = 0.0;
+    private double _frequency = PALDecoder.PAL_COLOR_CARRIER_FREQ;
+    private double _phaseErrorIntegrator = 0.0;
+
+    // PLL loop filter gains (these may need tuning for noisy signals)
+    private const double ProportionalGain = 0.1;
+    private const double IntegralGain = 0.005;
+
+    public ColorPll(int sampleRate)
+    {
+        _sampleRate = sampleRate;
+        _lineDuration = PALDecoder.PAL_LINE_DURATION;
+        // PAL spec: H-sync (4.7µs) + Breezeway (0.6µs) = 5.3µs
+        _burstStartTime = 5.3e-6;
+        _burstDuration = 2.25e-6;
+    }
+
+    // Generates one sample of the reference carrier and updates the PLL state
+    public Complex GetReference(Complex chromaSample, int sampleIndexInLine, bool isVInverted)
+    {
+        double timeInLine = sampleIndexInLine / _sampleRate;
+
+        // --- Phase Detection (only during the color burst) ---
+        if (timeInLine >= _burstStartTime && timeInLine < _burstStartTime + _burstDuration)
         {
-            for (int col = 0; col < width; col++)
-            {
-                // Use the original order (no horizontal flip)
-                double gray = 0.299 * rgbFrame[row, col, 0] +
-                             0.587 * rgbFrame[row, col, 1] +
-                             0.114 * rgbFrame[row, col, 2];
-                grayScale[row, col] = gray;
-            }
+            // Generate the PLL's current estimate of the carrier
+            var pllReference = Complex.FromPolarCoordinates(1, _phase);
+
+            // The expected phase of the burst depends on the V-axis switch
+            double expectedBurstPhase = isVInverted ? -Math.PI * 3 / 4 : -Math.PI / 4; // -135° or -45° for PAL swing
+            var burstReference = Complex.FromPolarCoordinates(1, _phase + expectedBurstPhase);
+
+            // Calculate phase error: how far off is our PLL from the actual burst?
+            double phaseError = (chromaSample * Complex.Conjugate(burstReference)).Phase;
+
+            // --- Loop Filter ---
+            // Update the integrator (I-term)
+            _phaseErrorIntegrator += phaseError * IntegralGain;
+
+            // Update the frequency based on the P and I terms
+            _frequency = PALDecoder.PAL_COLOR_CARRIER_FREQ + (phaseError * ProportionalGain) + _phaseErrorIntegrator;
         }
 
-        _plot.Clear();
-        var hm = _plot.Add.Heatmap(grayScale);
-        hm.Colormap = new ScottPlot.Colormaps.Grayscale();
+        // --- Numerically Controlled Oscillator (NCO) ---
+        // Advance the phase for the next sample using the (potentially updated) frequency
+        _phase += 2 * Math.PI * _frequency / _sampleRate;
 
-        _plot.XLabel("Pixel");
-        _plot.YLabel("Line");
-        _plot.Title("PAL Video Frame");
-        _plot.Axes.SetLimitsX(0, width);
-        _plot.Axes.SetLimitsY(0, height);
-        _plot.PlotControl?.Refresh();
+        // Wrap phase to keep it within [-PI, PI]
+        if (_phase > Math.PI) _phase -= 2 * Math.PI;
+        if (_phase < -Math.PI) _phase += 2 * Math.PI;
 
-        Console.WriteLine($"Decoded PAL frame: {width}x{height} pixels");
+        // Return the final, stable reference carrier for this sample
+        return Complex.FromPolarCoordinates(1, _phase);
     }
 }

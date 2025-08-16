@@ -59,7 +59,7 @@ public sealed partial class MainPage : Page
         var iqSamples = VideoFromFile.ConvertToIQ(samples.real.GetData<Int16>());
 
         // Initialize PAL decoder
-        var palDecoder = new PALDecoder(plot);
+        var palDecoder = new PALDecoder(plot, DispatcherQueue);
 
         // Decode PAL signal (assuming 10 MHz sample rate)
         palDecoder.DecodePALSignal(iqSamples, sampleRate: 10000000);
