@@ -135,8 +135,7 @@ public class PALDecoder
                }
 
                double[] frameData = new double[samplesPerFrame];
-               //var skipUntil = frameStart;
-               var skipUntil = (30 + 156) * 2 * samplesPerLine + frameStart;
+               var skipUntil = frameStart + 80;
                int numberOfFrames = (videoSignal.Length - skipUntil) / samplesPerFrame;
                for (int i = 0; i < numberOfFrames; i++)
                {
@@ -144,18 +143,45 @@ public class PALDecoder
 
                    // Separate fields
                    int fieldLines = PAL_VISIBLE_LINES / 2; // 288
-                                                           //int fieldLines = PAL_VISIBLE_LINES / 4 + 10; // 154
+                                                           // After you fill frameData with exactly one PAL frame (625 lines worth) OR one visible frame window,
+                                                           // split fields as contiguous blocks, not every-other-line.
+                   int linesPerFieldAll = PAL_LINES_PER_FRAME / 2;   // 312
+                   int fieldLinesVis = PAL_VISIBLE_LINES / 2;        // 288
+
+                   // If frameStart already points to Field-1 active top, use 0 and +linesPerFieldAll.
+                   // Otherwise add per-field VBI offsets (~22–25 lines) to land on active video:
+                   const int VBI_LINES_FIELD1 = 23;
+                   const int VBI_LINES_FIELD2 = 23;
+
+                   // Choose one of the two strategies:
+
+                   // Strategy A: frameData starts at Field-1 active line 0
+                   int field1StartLine = 0;
+                   int field2StartLine = linesPerFieldAll;
+
+                   // Strategy B: frameData starts at the very beginning of the frame (includes VBI)
+                   //int field1StartLine = VBI_LINES_FIELD1;
+                   //int field2StartLine = linesPerFieldAll + VBI_LINES_FIELD2;
+
                    double[] field1 = new double[fieldLines * samplesPerLine];
                    double[] field2 = new double[fieldLines * samplesPerLine];
 
-                   // Field 1: even lines (0,2,4,...)
-                   // Field 2: odd lines (1,3,5,...)
-                   for (int line = 0; line < fieldLines; line++)
+                   for (int j = 0; j < fieldLinesVis; j++)
                    {
-                       Array.Copy(frameData, line * 2 * samplesPerLine, field1, line * samplesPerLine, samplesPerLine);
-                       Array.Copy(frameData, (line * 2 + 1) * samplesPerLine, field2, line * samplesPerLine, samplesPerLine);
-                   }
+                       // Field 1: contiguous lines
+                       Array.Copy(
+                           frameData, (field1StartLine + j) * samplesPerLine,
+                           field1, j * samplesPerLine,
+                           samplesPerLine
+                       );
 
+                       // Field 2: next contiguous block (half-frame later)
+                       Array.Copy(
+                           frameData, (field2StartLine + j) * samplesPerLine,
+                           field2, j * samplesPerLine,
+                           samplesPerLine
+                       );
+                   }
                    // Process each field
                    var (lum1, chr1) = SeparateLumaChroma(field1, sampleRate, samplesPerLine);
                    var (lum2, chr2) = SeparateLumaChroma(field2, sampleRate, samplesPerLine);
@@ -200,70 +226,120 @@ public class PALDecoder
         return frame;
     }
 
+    // Works even if sync polarity is flipped by AM magnitude demod.
+    // Threshold adapts to your signal distribution (median/MAD), not a fixed “min*0.5”.
+    // Broad-pulse run-length avoids missing due to single-sample noise.
+    // Low-pass reduces 4.43 MHz ripple so runs are cleaner.
     private int FindFrameStart(double[] videoSignal, int sampleRate, int samplesPerLine)
     {
-        return 320;
-        Console.WriteLine("Searching for frame start...");
-
-        /* var frameData = new (double index, double value)[2 * samplesPerLine];
-         for (int i = 0; i < 2 * samplesPerLine; i++)
-         {
-             frameData[i] = (i, videoSignal[i]);
-         }
-         frameData = frameData.OrderBy(x => x.value).ToArray();
-
-         foreach (var frame in frameData)
-         {
-             Console.WriteLine($"{frame.value}:{frame.index}");
-         }*/
-
-        int searchLength = sampleRate; // Search up to 1 second
-        double syncThreshold = videoSignal.Take(searchLength).Min() * 0.5;
-
-        int broadPulseMinDuration = (int)(20e-6 * sampleRate); // Broad pulses are > 20µs
-
-        for (int i = 0; i < searchLength - 5 * samplesPerLine; i++)
+        Console.WriteLine("Searching for frame start (robust VBI detection)...");
+        if (videoSignal == null || videoSignal.Length < samplesPerLine * 50)
         {
-            // Is this sample a potential start of a sync pulse?
-            if (videoSignal[i] > syncThreshold && videoSignal[i + 1] < syncThreshold)
+            Console.WriteLine("Signal too short for VBI search, fallback to 0.");
+            return 0;
+        }
+
+        // Search up to ~0.25 s (enough for multiple frames)
+        int searchLength = Math.Min(videoSignal.Length, Math.Max(sampleRate / 4, samplesPerLine * 625));
+        var segment = videoSignal.Take(searchLength).ToArray();
+
+        // 1) Optional light low-pass (reduces chroma ripple). 51-tap Hamming MA.
+        segment = LightLowPass(segment);
+
+        // 2) Auto-polarity: ensure sync pulses are negative
+        double segMin = segment.Min();
+        double segMax = segment.Max();
+        bool inverted = Math.Abs(segMax) > Math.Abs(segMin); // peaks stronger than troughs → invert
+        if (inverted)
+        {
+            for (int j = 0; j < segment.Length; j++) segment[j] = -segment[j];
+            (segMin, segMax) = (segment.Min(), segment.Max());
+        }
+
+        // 3) Robust threshold from median and MAD
+        double median = Median(segment);
+        double mad = Median(segment.Select(x => Math.Abs(x - median)).ToArray());
+        if (mad <= 1e-12) mad = (segMax - segMin) / 50.0; // fallback
+                                                          // Sync pulses are well below blanking; go several MADs below median
+        double syncThreshold = median - 3.0 * mad;
+
+        int broadMin = (int)Math.Round(20e-6 * sampleRate); // ≥20 µs → broad pulse
+        int i = 0;
+
+        while (i < segment.Length - samplesPerLine)
+        {
+            // Find start of a run below threshold
+            while (i < segment.Length && !(segment[i] < syncThreshold)) i++;
+            if (i >= segment.Length) break;
+
+            int runStart = i;
+            while (i < segment.Length && segment[i] < syncThreshold) i++;
+            int runLen = i - runStart;
+
+            if (runLen >= broadMin)
             {
-                int pulseStart = i + 1;
-                int pulseEnd = pulseStart;
-                while (pulseEnd < videoSignal.Length && videoSignal[pulseEnd] < syncThreshold)
+                // Validate there is another broad run shortly after (within a couple of lines)
+                int j = i;
+                int endSearch = Math.Min(segment.Length, runStart + 4 * samplesPerLine);
+                bool secondBroadFound = false;
+                while (j < endSearch)
                 {
-                    pulseEnd++;
-                }
+                    // skip above threshold
+                    while (j < endSearch && !(segment[j] < syncThreshold)) j++;
+                    int r2s = j;
+                    while (j < endSearch && segment[j] < syncThreshold) j++;
+                    int r2len = j - r2s;
 
-                int pulseDuration = pulseEnd - pulseStart;
-
-                // Check if we found a long "broad pulse" from the vertical sync pattern
-                if (pulseDuration > broadPulseMinDuration)
-                {
-                    // A real VBI has a sequence of these. Check for another one nearby.
-                    int nextPulseStart = pulseEnd;
-                    while (nextPulseStart < videoSignal.Length && videoSignal[nextPulseStart] > syncThreshold)
+                    if (r2len >= broadMin)
                     {
-                        nextPulseStart++;
-                    }
-
-                    if (nextPulseStart < videoSignal.Length && videoSignal[nextPulseStart] < syncThreshold)
-                    {
-                        // Found the start of a second pulse. This is very likely the VBI.
-                        // The active video for the first field starts ~22.5 lines after the VBI starts.
-                        int frameStartOffset = (int)(22.5 * samplesPerLine);
-                        int frameStart = pulseStart + frameStartOffset;
-
-                        Console.WriteLine($"VBI broad pulse detected at sample {pulseStart}. Calculated frame start: {frameStart}");
-                        return frameStart;
+                        secondBroadFound = true;
+                        break;
                     }
                 }
-                // Skip ahead to the end of the pulse we just checked
-                i = pulseEnd;
+
+                if (secondBroadFound)
+                {
+                    int frameStart = runStart + (int)Math.Round(22.5 * samplesPerLine);
+                    Console.WriteLine($"VBI detected (inv={inverted}, thr={syncThreshold:E3}). Field1 active ≈ {frameStart}");
+                    return frameStart;
+                }
             }
+            // continue scanning
         }
 
         Console.WriteLine("Could not find VBI pattern, using default of 0.");
         return 0;
+    }
+    private static double Median(double[] a)
+    {
+        var b = (double[])a.Clone();
+        Array.Sort(b);
+        int n = b.Length;
+        return (n % 2 == 1) ? b[n / 2] : 0.5 * (b[n / 2 - 1] + b[n / 2]);
+    }
+
+    private static double[] LightLowPass(double[] x)
+    {
+        // 51-tap Hamming moving-average-like FIR (simple, fast)
+        const int N = 51;
+        if (x.Length < N) return x;
+        double[] w = new double[N];
+        for (int i = 0; i < N; i++) w[i] = 0.54 - 0.46 * Math.Cos(2 * Math.PI * i / (N - 1));
+        double sumw = w.Sum();
+        for (int i = 0; i < N; i++) w[i] /= sumw;
+
+        double[] y = new double[x.Length];
+        for (int n = 0; n < x.Length; n++)
+        {
+            double acc = 0;
+            for (int k = 0; k < N; k++)
+            {
+                int idx = n - k;
+                if (idx >= 0) acc += x[idx] * w[k];
+            }
+            y[n] = acc;
+        }
+        return y;
     }
 
     private double[] AMDemodulation(Complex[] iqSamples)
