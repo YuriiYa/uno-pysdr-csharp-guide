@@ -1,11 +1,11 @@
 <mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/28.0.4 Chrome/138.0.7204.97 Electron/37.2.1 Safari/537.36" version="28.0.4">
   <diagram name="Page-1" id="MEMlhR0HJlRjq8jK_RSp">
-    <mxGraphModel dx="9390" dy="5273" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+    <mxGraphModel dx="2239" dy="1935" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-        <mxCell id="UxEVvuUElZgrL1N4Tevr-11" value="Mindmap" style="swimlane;startSize=20;horizontal=1;containerType=tree;" parent="1" vertex="1">
-          <mxGeometry x="-250" y="-320" width="7430" height="7190" as="geometry" />
+        <mxCell id="UxEVvuUElZgrL1N4Tevr-11" value="Mindmap" style="swimlane;startSize=20;horizontal=1;containerType=tree;align=left;" parent="1" vertex="1">
+          <mxGeometry x="-310" y="-290" width="7430" height="7190" as="geometry" />
         </mxCell>
         <mxCell id="UxEVvuUElZgrL1N4Tevr-12" value="" style="edgeStyle=entityRelationEdgeStyle;startArrow=none;endArrow=none;segment=10;curved=1;sourcePerimeterSpacing=0;targetPerimeterSpacing=0;rounded=0;" parent="UxEVvuUElZgrL1N4Tevr-11" source="UxEVvuUElZgrL1N4Tevr-16" target="UxEVvuUElZgrL1N4Tevr-17" edge="1">
           <mxGeometry relative="1" as="geometry" />
@@ -474,6 +474,58 @@
         </UserObject>
         <mxCell id="w__1xN_Ens9i6bnrCjmE-1" value="&lt;h1 style=&quot;margin-top: 0px;&quot;&gt;Input data&lt;span style=&quot;font-size: 12px; font-weight: 400;&quot;&gt;:&lt;/span&gt;&lt;/h1&gt;&lt;p&gt;Center Freq: 179100000Hz&lt;/p&gt;&lt;p&gt;FileMark: RIFF&lt;/p&gt;&lt;p&gt;FileSize: 894697508&lt;/p&gt;&lt;p&gt;Format: WAVE&lt;/p&gt;&lt;p&gt;ChunkMarker: fmt&amp;nbsp;&lt;/p&gt;&lt;p&gt;ChankLength: 16&lt;/p&gt;&lt;p&gt;AudioFormat: 1&lt;/p&gt;&lt;p&gt;Channels: 2&lt;/p&gt;&lt;p&gt;SampleRate: 10000000&lt;/p&gt;&lt;p&gt;AverageBytePerSecond: 40000000&lt;/p&gt;&lt;p&gt;BlockAlign: 4&lt;/p&gt;&lt;p&gt;AudioBitPerSample: 16&lt;/p&gt;&lt;p&gt;Data: 1635017060&lt;/p&gt;&lt;p&gt;DataFileSize: 894697472&lt;/p&gt;&lt;p&gt;Decoded PAL frame: 640x576 pixels&lt;/p&gt;" style="text;html=1;whiteSpace=wrap;overflow=hidden;rounded=0;" parent="UxEVvuUElZgrL1N4Tevr-11" vertex="1">
           <mxGeometry x="345.5" y="1770" width="254.5" height="430" as="geometry" />
+        </mxCell>
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-139" style="rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=light-dark(#2D7600, #e1ff00);dashPattern=8 8;fillColor=#60a917;strokeWidth=3;" edge="1" parent="UxEVvuUElZgrL1N4Tevr-11" source="n9YqHZqSXgJRUGCfHLcp-1" target="n9YqHZqSXgJRUGCfHLcp-137">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-1" value="Front Porch&lt;div&gt;1.5ms&lt;/div&gt;&lt;div&gt;ov&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
+          <mxGeometry x="3760" y="5409" width="120" height="81" as="geometry" />
+        </mxCell>
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-2" value="H-sync Pulse&lt;div&gt;4.7 ms&lt;/div&gt;&lt;div&gt;-0.3 V&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
+          <mxGeometry x="3880" y="5409" width="130" height="81" as="geometry" />
+        </mxCell>
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-3" value="Video signal line" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
+          <mxGeometry x="3759.19" y="5370" width="160" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-4" value="Back Porch&lt;div&gt;5.8ms&lt;/div&gt;&lt;div&gt;0v&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
+          <mxGeometry x="4010" y="5409" width="340" height="41" as="geometry" />
+        </mxCell>
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-5" value="Active video&lt;div&gt;luma (0v to 0.7V + Chroma (subcarier)&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
+          <mxGeometry x="4350" y="5409" width="450" height="81" as="geometry" />
+        </mxCell>
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-137" value="A brief, stable period of black level that ensures the previous line&amp;#39;s active video has finished before the critical sync pulse arrives. It allows the receiver&amp;#39;s circuitry to prepare for the sync." style="shape=note;backgroundOutline=1;fontColor=#000000;darkOpacity=0.05;fillColor=#FFF9B2;strokeColor=none;fillStyle=solid;direction=west;gradientDirection=north;gradientColor=#FFF2A1;shadow=1;size=20;pointerEvents=1;align=left;html=1;whiteSpace=wrap;spacingTop=1;spacing=11;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
+          <mxGeometry x="3675.5" y="5578.5" width="150" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-141" value="&lt;font&gt;This is the master timing pulse for the horizontal line. Its sharp leading edge is the primary trigger that tells the receiver to end the current line and begin the horizontal retrace (flyback). This is the pulse your line-synchronization code should lock onto.&lt;/font&gt;" style="shape=note;backgroundOutline=1;fontColor=#000000;darkOpacity=0.05;fillColor=#FFF9B2;strokeColor=none;fillStyle=solid;direction=west;gradientDirection=north;gradientColor=#FFF2A1;shadow=1;size=20;pointerEvents=1;align=left;html=1;whiteSpace=wrap;spacingTop=1;spacing=11;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
+          <mxGeometry x="3850" y="5578.5" width="150" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-143" style="rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=light-dark(#2D7600, #e1ff00);dashPattern=8 8;fillColor=#60a917;strokeWidth=3;" edge="1" parent="UxEVvuUElZgrL1N4Tevr-11" source="n9YqHZqSXgJRUGCfHLcp-2" target="n9YqHZqSXgJRUGCfHLcp-141">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="3860" y="5550" as="sourcePoint" />
+            <mxPoint x="3844" y="5642" as="targetPoint" />
+            <Array as="points" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-144" value="Breezeway&amp;nbsp;&lt;span style=&quot;color: rgb(204, 204, 204); font-family: &amp;quot;Segoe WPC&amp;quot;, &amp;quot;Segoe UI&amp;quot;, sans-serif; font-size: 13px; text-align: left; background-color: rgb(31, 31, 31);&quot;&gt;0V&lt;/span&gt;&lt;div&gt;0.6ms&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
+          <mxGeometry x="4010" y="5450" width="100" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-145" value="Color Burst&lt;div&gt;2.25 µs&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
+          <mxGeometry x="4110" y="5450" width="110" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-146" value="Quiet back-porch plateau&amp;nbsp;0V&lt;div&gt;2.95 µs&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
+          <mxGeometry x="4220" y="5450" width="130" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-147" value="~10±1 cycles at 4.43361875 MHz. Used to lock PLL phase/frequency and signal PAL V-axis state" style="shape=note;backgroundOutline=1;fontColor=#000000;darkOpacity=0.05;fillColor=#FFF9B2;strokeColor=none;fillStyle=solid;direction=west;gradientDirection=north;gradientColor=#FFF2A1;shadow=1;size=20;pointerEvents=1;align=left;html=1;whiteSpace=wrap;spacingTop=1;spacing=11;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
+          <mxGeometry x="4140" y="5570" width="137" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-148" style="rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;strokeColor=light-dark(#2D7600, #e1ff00);dashPattern=8 8;fillColor=#60a917;strokeWidth=3;" edge="1" parent="UxEVvuUElZgrL1N4Tevr-11" source="n9YqHZqSXgJRUGCfHLcp-145" target="n9YqHZqSXgJRUGCfHLcp-147">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="4257" y="5650" as="sourcePoint" />
+            <mxPoint x="4250" y="5739" as="targetPoint" />
+            <Array as="points" />
+          </mxGeometry>
         </mxCell>
       </root>
     </mxGraphModel>

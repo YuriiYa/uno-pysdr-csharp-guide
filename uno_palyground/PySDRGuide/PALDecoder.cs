@@ -2,6 +2,15 @@ using ScottPlot;
 using System.Numerics;
 using Microsoft.UI.Dispatching;
 
+// PAL D type parameters:
+
+// Video bandwidth: ~6.0 MHz (System D/K)
+// FM sound offset: +6.5 MHz (for awareness; don’t band-pass near it)
+// Luma LPF cutoff: ~5.0–5.5 MHz (I suggest 5.0 MHz for margin)
+// Chroma BPF: center at 4.43361875 MHz, tighten to ~3.9–4.95 MHz
+// Channel bandwidth: ~8.0 MHz (for awareness; don’t band-pass near it)
+
+
 // 0 Hz    1 MHz    3 MHz   3.5 MHz 4.43 MHz  5.5 MHz    8 MHz
 // |-------|--------|--------|--------|-------|----------|-------|
 // |  DC   | Luma   | Guard  |     Chroma     |  Sound   | Rest  |
@@ -98,11 +107,53 @@ using Microsoft.UI.Dispatching;
 // 9	    5	    1 to 312.5	        +V	                0°	                    Sequence Repeats. Identical to Field 1.
 
 // This complex relationship is why professional PAL editing equipment had to be "8-field aware" to ensure edits were seamless and didn't disrupt the color sequence. For your decoder, while you don't need to implement all of this, understanding it explains why simple frame-by-frame processing can sometimes lead to color or timing artifacts.
+// Add system profiles above the PALDecoder class or inside it (make static if inside)
+
+// Each field has several lines that do not contain any picture information. These lines occur during the Vertical Blanking Interval (VBI) when the electron beam in the TV tube returns from the bottom to the top of the screen. The VBI also covers several lines which carry data such as Closed Captions and Teletext.
+// ITU-R BT.601-5 and 656-4 describe a digital active area. This is used when the analogue video signal is converted to a digital format, and it does not exactly coincide with the analogue active area.
+// detailed explanation of the format https://dvmp.co.uk/digital-video.htm
+public enum TvSystem { PAL_I, PAL_DK }
+
+public readonly record struct SystemProfile(
+    double LumaCutoffHz,
+    double ChromaLowHz,
+    double ChromaHighHz,
+    double AudioOffsetHz,
+    double VideoBandwidthHz
+)
+{
+    public static SystemProfile For(TvSystem s) => s switch
+    {
+        TvSystem.PAL_DK => new(
+            LumaCutoffHz: 5.0e6,        // keep luma safely below 6 MHz video BW
+            ChromaLowHz: 3.9e6,        // tighter around 4.4336 MHz
+            ChromaHighHz: 4.95e6,
+            AudioOffsetHz: 6.5e6,       // FM sound offset (awareness)
+            VideoBandwidthHz: 6.0e6
+        ),
+        TvSystem.PAL_I => new(
+            LumaCutoffHz: 4.8e6,
+            ChromaLowHz: 3.9e6,
+            ChromaHighHz: 4.95e6,
+            AudioOffsetHz: 6.0e6,
+            VideoBandwidthHz: 5.5e6
+        ),
+        _ => throw new ArgumentOutOfRangeException(nameof(s))
+    };
+}
+
+public enum FieldOrder
+{
+    TopFieldFirst,
+    BottomFieldFirst
+}
 
 public class PALDecoder
 {
     private readonly Plot _plot;
     private readonly DispatcherQueue _dispatcherQueue;
+    private readonly SystemProfile _profile;
+    private readonly FieldOrder _fieldOrder;
 
     // PAL I specifications
     public const double PAL_FRAME_RATE = 25.0; // 25 fps
@@ -112,10 +163,12 @@ public class PALDecoder
     public const double PAL_COLOR_CARRIER_FREQ = 4433618.75; // Hz
     public const double PAL_VIDEO_BANDWIDTH = 5.5e6; // 5.5 MHz
 
-    public PALDecoder(Plot plot, DispatcherQueue dispatcherQueue)
+    public PALDecoder(Plot plot, DispatcherQueue dispatcherQueue, TvSystem system = TvSystem.PAL_DK, FieldOrder fieldOrder = FieldOrder.BottomFieldFirst)
     {
         _plot = plot;
         _dispatcherQueue = dispatcherQueue;
+        _profile = SystemProfile.For(system);
+        _fieldOrder = fieldOrder;
     }
 
     public void DecodePALSignal(Complex[] iqSamples, int sampleRate)
@@ -135,11 +188,18 @@ public class PALDecoder
                }
 
                double[] frameData = new double[samplesPerFrame];
-               var skipUntil = frameStart + 80;
+               int autoHOffset = EstimateHorizontalOffset(videoSignal, frameStart, samplesPerLine, sampleRate);
+               var skipUntil = frameStart + autoHOffset;
                int numberOfFrames = (videoSignal.Length - skipUntil) / samplesPerFrame;
+
+               var delta = samplesPerLine / 2;
+
                for (int i = 0; i < numberOfFrames; i++)
                {
-                   Array.Copy(videoSignal, skipUntil + i * samplesPerFrame, frameData, 0, samplesPerFrame);
+                   Array.Copy(videoSignal, skipUntil + i * samplesPerFrame+ delta, frameData, 0, samplesPerFrame);
+
+                   // per-line horizontal alignment (aligns HSYNC→active to spec 10.5 µs)
+                   // frameData = AlignLinesInPlace(frameData, samplesPerLine, sampleRate);
 
                    // Separate fields
                    int fieldLines = PAL_VISIBLE_LINES / 2; // 288
@@ -150,8 +210,8 @@ public class PALDecoder
 
                    // If frameStart already points to Field-1 active top, use 0 and +linesPerFieldAll.
                    // Otherwise add per-field VBI offsets (~22–25 lines) to land on active video:
-                   const int VBI_LINES_FIELD1 = 23;
-                   const int VBI_LINES_FIELD2 = 23;
+                   // const int VBI_LINES_FIELD1 = 23;
+                   // const int VBI_LINES_FIELD2 = 23;
 
                    // Choose one of the two strategies:
 
@@ -186,19 +246,289 @@ public class PALDecoder
                    var (lum1, chr1) = SeparateLumaChroma(field1, sampleRate, samplesPerLine);
                    var (lum2, chr2) = SeparateLumaChroma(field2, sampleRate, samplesPerLine);
 
-                   var (u1, v1) = DecodeChroma(chr1, sampleRate);
-                   var (u2, v2) = DecodeChroma(chr2, sampleRate);
+                   // Use absolute line offsets for V-axis alternation (preserves 8-field parity across fields)
+                   var (u1, v1) = DecodeChroma(chr1, sampleRate, samplesPerLine, startLineOffset: field1StartLine);
+                   var (u2, v2) = DecodeChroma(chr2, sampleRate, samplesPerLine, startLineOffset: field2StartLine);
+
+
+                   // OPTIONAL: crop Y/U/V after decode (safe; burst already used)
+                   var activeWidth = samplesPerLine;
+                   //    (lum1, var activeWidth) = CropToActive(lum1, samplesPerLine, sampleRate);
+                   //    (u1, _) = CropToActive(u1, samplesPerLine, sampleRate);
+                   //    (v1, _) = CropToActive(v1, samplesPerLine, sampleRate);
+
+                   //    (lum2, _) = CropToActive(lum2, samplesPerLine, sampleRate);
+                   //    (u2, _) = CropToActive(u2, samplesPerLine, sampleRate);
+                   //    (v2, _) = CropToActive(v2, samplesPerLine, sampleRate);
+
+                   // Convert each field (use activeWidth as samplesPerLine)
+                   byte[,,] rgbField1 = ConvertYUVToRGB_BT601_Optimized(lum1, u1, v1, activeWidth);
+                   byte[,,] rgbField2 = ConvertYUVToRGB_BT601_Optimized(lum2, u2, v2, activeWidth);
 
                    // Interleave fields for display
-                   byte[,,] rgbFrame = InterleaveFields(
-                       ConvertYUVToRGB_BT601_Optimized(lum1, u1, v1, samplesPerLine),
-                       ConvertYUVToRGB_BT601_Optimized(lum2, u2, v2, samplesPerLine)
-                   );
-
+                   byte[,,] rgbFrame = InterleaveFields(rgbField1, rgbField2);
                    DisplayVideoFrame(rgbFrame);
-
                }
            }, TaskCreationOptions.LongRunning);
+    }
+
+    private (double[] data, int width) CropToActive(double[] signal, int samplesPerLine, int sampleRate)
+    {
+        int lines = signal.Length / samplesPerLine;
+        int activeWidth = (int)Math.Round(52e-6 * sampleRate);
+        int desiredActiveCol = (int)Math.Round((4.7e-6 + 5.8e-6) * sampleRate);
+
+        // Bounds safety
+        int copyWidth = Math.Min(activeWidth, Math.Max(0, samplesPerLine - desiredActiveCol));
+        double[] outSig = new double[lines * copyWidth];
+
+        for (int ln = 0; ln < lines; ln++)
+        {
+            int src = ln * samplesPerLine + desiredActiveCol;
+            int dst = ln * copyWidth;
+            Array.Copy(signal, src, outSig, dst, copyWidth);
+        }
+        return (outSig, copyWidth);
+    }
+
+    // What it aims to do
+    // Goal: For every video line in the frame buffer, horizontally align the start of “active video” to the same column.
+    // How: Detect the horizontal sync pulse (H-sync), compute where active video should begin (H-sync + back porch), then shift the line left/right so that active video starts at a fixed index.
+    private double[] AlignLinesInPlace(double[] frameData, int samplesPerLine, int sampleRate)
+    {
+        const double HSYNC_US = 4.7e-6; // expected width of the H-sync pulse.
+        const double BACK_PORCH_US = 5.8e-6; // time between end of H-sync and the start of active video.
+        const double SEARCH_US = (30 + 10) * 1e-6; // width of the initial window at the start of each line to search for sync.
+        const int LPF_TAPS = 51; // must match LightLowPass(). FIR low-pass used to suppress 4.43 MHz chroma ripple; 
+        int gd = (LPF_TAPS - 1) / 2; // introduces group delay gd = (51−1)/2 = 25 samples.
+
+        int lines = frameData.Length / samplesPerLine; //400 000 /640 = 625
+        int searchCols = Math.Min(samplesPerLine, (int)Math.Round(SEARCH_US * sampleRate)); //300
+        int hsyncSamples = Math.Max(8, (int)Math.Round(HSYNC_US * sampleRate)); // 47/ how many samples the H-sync should span.
+        int desiredActiveCol = (int)Math.Round((HSYNC_US + BACK_PORCH_US) * sampleRate); //105 / target column for start of active video (≈10.5 µs from H-sync leading edge).
+
+        for (int ln = 0; ln < lines; ln++)
+        {
+            int lineStart = ln * samplesPerLine;
+
+            // Window + light LPF
+            double[] win = new double[searchCols];
+            Array.Copy(frameData, lineStart, win, 0, searchCols);
+            win = LightLowPass(win);
+
+            // Ensure sync negative
+            double wMin = win.Min(), wMax = win.Max();
+            if (Math.Abs(wMax) > Math.Abs(wMin))
+            {
+                for (int i = 0; i < win.Length; i++) win[i] = -win[i];
+                (wMin, wMax) = (-wMax, -wMin);
+            }
+
+            // Moving-sum over HSYNC to find deepest segment
+            int bestStart = -1;
+            double sum = 0, bestSum = double.PositiveInfinity;
+            int L = hsyncSamples, N = win.Length;
+
+            // Slide a window of L = hsyncSamples across win and compute the sum.
+            if (L <= N)
+            {
+                for (int i = 0; i < L; i++) sum += win[i];
+                bestSum = sum; bestStart = 0;
+                for (int i = L; i < N; i++)
+                {
+                    sum += win[i] - win[i - L];
+                    if (sum < bestSum)
+                    {
+                        bestSum = sum;
+                        bestStart = i - L + 1;
+                    }
+                }
+            }
+
+            int activeCol = -1;
+            if (bestStart >= 0)
+            {
+                // Threshold refine and group-delay compensate
+                double med = Median(win);
+                double mad = Median(win.Select(v => Math.Abs(v - med)).ToArray());
+                if (mad <= 1e-12) mad = (wMax - wMin) / 50.0;
+                double thr = med - 2.5 * mad;
+
+                int rs = bestStart;
+                while (rs > 0 && win[rs - 1] < thr) rs--;
+                int re = Math.Min(N - 1, bestStart + L - 1);
+                while (re + 1 < N && win[re + 1] < thr) re++;
+
+                int syncStartCol = Math.Max(0, rs - gd);
+                activeCol = syncStartCol + (int)Math.Round((HSYNC_US + BACK_PORCH_US) * sampleRate);
+            }
+            else
+            {
+                // Edge fallback + GD compensation
+                int edgeIdx = -1;
+                double minDer = double.PositiveInfinity;
+                for (int i = 1; i < N; i++)
+                {
+                    double d = win[i] - win[i - 1];
+                    if (d < minDer) { minDer = d; edgeIdx = i; }
+                }
+                if (edgeIdx > 0)
+                {
+                    int syncEdge = Math.Max(0, edgeIdx - gd);
+                    activeCol = syncEdge + (int)Math.Round((HSYNC_US + BACK_PORCH_US) * sampleRate);
+                }
+            }
+
+            if (activeCol <= 0) continue;
+
+            // Compute per-line shift so active starts at desiredActiveCol
+            int delta = desiredActiveCol - activeCol; // >0 shift right, <0 shift left
+            if (delta == 0) continue;
+
+            if (delta < 0)
+            {
+                double[] adjustedVideo = new double[frameData.Length];
+                Array.Copy(frameData, -delta, adjustedVideo, 0, frameData.Length - Math.Abs(delta));
+
+                for (int i = frameData.Length - Math.Abs(delta); i < adjustedVideo.Length; i++)
+                    adjustedVideo[i] = 0;
+
+                return adjustedVideo;
+            }
+
+            /*
+                if (delta > 0)
+                {
+                    for (int i = samplesPerLine - 1; i >= delta; i--)
+                        frameData[lineStart + i] = frameData[lineStart + i - delta];
+                    for (int i = 0; i < delta; i++)
+                        frameData[lineStart + i] = 0;
+                }
+                else
+                {
+                    delta = -delta;
+                    for (int i = 0; i < samplesPerLine - delta; i++)
+                        frameData[lineStart + i] = frameData[lineStart + i + delta];
+                    for (int i = samplesPerLine - delta; i < samplesPerLine; i++)
+                        frameData[lineStart + i] = 0;
+                }*/
+        }
+
+        return frameData;
+    }
+
+    // auto-find the horizontal start by detecting the H-sync pulse per line and computing the active-video start from timing 
+    // (4.7 µs sync + 5.8 µs back porch). 
+    // Then replace your manual +80 with a measured global offset.
+    private int EstimateHorizontalOffset(double[] videoSignal, int frameStart, int samplesPerLine, int sampleRate, int linesToUse = 24)
+    {
+        const double HSYNC_US = 4.7e-6;
+        const double BACK_PORCH_US = 5.8e-6;
+        const double SEARCH_US = 30e-6; // include front porch, sync, back porch
+        const int LPF_TAPS = 51;        // must match LightLowPass()
+        int gd = (LPF_TAPS - 1) / 2;    // FIR group delay in samples
+
+        int searchCols = Math.Min(samplesPerLine, (int)Math.Round(SEARCH_US * sampleRate));
+        int hsyncSamples = Math.Max(8, (int)Math.Round(HSYNC_US * sampleRate));
+        int desiredActiveCol = (int)Math.Round((HSYNC_US + BACK_PORCH_US) * sampleRate); // ≈ 10.5 µs
+
+        List<int> activeStarts = new();
+
+        for (int ln = 0; ln < linesToUse; ln++)
+        {
+            int lineStart = frameStart + ln * samplesPerLine;
+            if (lineStart + searchCols > videoSignal.Length) break;
+
+            // Window and light LPF to kill chroma ripple
+            double[] win = new double[searchCols];
+            Array.Copy(videoSignal, lineStart, win, 0, searchCols);
+            win = LightLowPass(win);
+
+            // Auto polarity per line (ensure sync is negative)
+            double wMin = win.Min(), wMax = win.Max();
+            if (Math.Abs(wMax) > Math.Abs(wMin))
+            {
+                for (int i = 0; i < win.Length; i++) win[i] = -win[i];
+                (wMin, wMax) = (-wMax, -wMin);
+            }
+
+            // Rectangular correlation with a 4.7 µs window → find deepest segment
+            int bestStart = -1;
+            double sum = 0, bestSum = double.PositiveInfinity;
+            int L = hsyncSamples;
+            int N = win.Length;
+
+            if (L <= N)
+            {
+                for (int i = 0; i < L; i++) sum += win[i];
+                bestSum = sum; bestStart = 0;
+                for (int i = L; i < N; i++)
+                {
+                    sum += win[i] - win[i - L];
+                    if (sum < bestSum)
+                    {
+                        bestSum = sum;
+                        bestStart = i - L + 1;
+                    }
+                }
+            }
+
+            bool added = false;
+            if (bestStart >= 0)
+            {
+                // Refine with robust threshold
+                double med = Median(win);
+                double mad = Median(win.Select(v => Math.Abs(v - med)).ToArray());
+                if (mad <= 1e-12) mad = (wMax - wMin) / 50.0;
+                double thr = med - 2.5 * mad;
+
+                int rs = bestStart;
+                while (rs > 0 && win[rs - 1] < thr) rs--;
+                int re = Math.Min(N - 1, bestStart + L - 1);
+                while (re + 1 < N && win[re + 1] < thr) re++;
+
+                int len = re - rs + 1;
+                if (len >= (int)(0.5 * hsyncSamples) && len <= (int)(2.0 * hsyncSamples))
+                {
+                    // Compensate LPF group delay
+                    int syncStartCol = Math.Max(0, rs - gd);
+                    int activeCol = syncStartCol + (int)Math.Round((HSYNC_US + BACK_PORCH_US) * sampleRate);
+                    activeStarts.Add(activeCol);
+                    added = true;
+                }
+            }
+
+            // Fallback: largest negative edge (sync leading edge)
+            if (!added)
+            {
+                int edgeIdx = -1;
+                double minDer = double.PositiveInfinity;
+                for (int i = 1; i < N; i++)
+                {
+                    double d = win[i] - win[i - 1];
+                    if (d < minDer) { minDer = d; edgeIdx = i; }
+                }
+                if (edgeIdx > 0)
+                {
+                    int syncEdge = Math.Max(0, edgeIdx - gd); // compensate LPF delay
+                    int activeCol = syncEdge + (int)Math.Round((HSYNC_US + BACK_PORCH_US) * sampleRate);
+                    activeStarts.Add(activeCol);
+                }
+            }
+        }
+
+        if (activeStarts.Count == 0)
+        {
+            Console.WriteLine("HSYNC not found; ");
+            return 0;
+        }
+
+        int medianActiveCol = activeStarts.OrderBy(x => x).ElementAt(activeStarts.Count / 2);
+        int offset = desiredActiveCol - medianActiveCol; // positive ⇒ shift right; negative ⇒ shift left
+        offset = Math.Max(-samplesPerLine / 2, Math.Min(samplesPerLine / 2, offset));
+
+        Console.WriteLine($"Auto horizontal offset = {offset} (median={medianActiveCol}, desired={desiredActiveCol}, gd={gd}, lines={activeStarts.Count})");
+        return offset;
     }
 
     // Interleave two fields into a single frame (PAL interlacing)
@@ -206,8 +536,8 @@ public class PALDecoder
     {
         int fieldLines = field1.GetLength(0);
         int width = field1.GetLength(1);
-        int height = PAL_VISIBLE_LINES; // Only visible lines
-        //int height = (PAL_VISIBLE_LINES / 4 + 10) * 2;
+        int height = Math.Min(PAL_VISIBLE_LINES, fieldLines * 2);
+
         byte[,,] frame = new byte[height, width, 3];
 
         int outLine = 0;
@@ -217,8 +547,18 @@ public class PALDecoder
             {
                 for (int c = 0; c < 3; c++)
                 {
-                    frame[outLine, j, c] = field1[i, j, c];     // Even lines
-                    frame[outLine + 1, j, c] = field2[i, j, c]; // Odd lines
+                    if (_fieldOrder == FieldOrder.BottomFieldFirst)
+                    {
+                        // BFF: top line from Field 2, next line from Field 1
+                        frame[outLine, j, c] = field2[i, j, c];
+                        frame[outLine + 1, j, c] = field1[i, j, c];
+                    }
+                    else
+                    {
+                        // TFF: top line from Field 1, next line from Field 2
+                        frame[outLine, j, c] = field1[i, j, c];
+                        frame[outLine + 1, j, c] = field2[i, j, c];
+                    }
                 }
             }
             outLine += 2;
@@ -239,36 +579,29 @@ public class PALDecoder
             return 0;
         }
 
-        // Search up to ~0.25 s (enough for multiple frames)
         int searchLength = Math.Min(videoSignal.Length, Math.Max(sampleRate / 4, samplesPerLine * 625));
-        var segment = videoSignal.Take(searchLength).ToArray();
+        var segment = LightLowPass(videoSignal.Take(searchLength).ToArray());
 
-        // 1) Optional light low-pass (reduces chroma ripple). 51-tap Hamming MA.
-        segment = LightLowPass(segment);
-
-        // 2) Auto-polarity: ensure sync pulses are negative
-        double segMin = segment.Min();
-        double segMax = segment.Max();
-        bool inverted = Math.Abs(segMax) > Math.Abs(segMin); // peaks stronger than troughs → invert
+        // auto polarity
+        double segMin = segment.Min(), segMax = segment.Max();
+        bool inverted = Math.Abs(segMax) > Math.Abs(segMin);
         if (inverted)
         {
             for (int j = 0; j < segment.Length; j++) segment[j] = -segment[j];
             (segMin, segMax) = (segment.Min(), segment.Max());
         }
 
-        // 3) Robust threshold from median and MAD
+        // robust threshold
         double median = Median(segment);
         double mad = Median(segment.Select(x => Math.Abs(x - median)).ToArray());
-        if (mad <= 1e-12) mad = (segMax - segMin) / 50.0; // fallback
-                                                          // Sync pulses are well below blanking; go several MADs below median
+        if (mad <= 1e-12) mad = (segMax - segMin) / 50.0;
         double syncThreshold = median - 3.0 * mad;
 
-        int broadMin = (int)Math.Round(20e-6 * sampleRate); // ≥20 µs → broad pulse
+        int broadMin = (int)Math.Round(20e-6 * sampleRate); // broad pulse ≥20 µs
         int i = 0;
 
         while (i < segment.Length - samplesPerLine)
         {
-            // Find start of a run below threshold
             while (i < segment.Length && !(segment[i] < syncThreshold)) i++;
             if (i >= segment.Length) break;
 
@@ -278,30 +611,26 @@ public class PALDecoder
 
             if (runLen >= broadMin)
             {
-                // Validate there is another broad run shortly after (within a couple of lines)
+                // confirm a second broad pulse nearby
                 int j = i;
                 int endSearch = Math.Min(segment.Length, runStart + 4 * samplesPerLine);
                 bool secondBroadFound = false;
                 while (j < endSearch)
                 {
-                    // skip above threshold
                     while (j < endSearch && !(segment[j] < syncThreshold)) j++;
                     int r2s = j;
                     while (j < endSearch && segment[j] < syncThreshold) j++;
                     int r2len = j - r2s;
-
-                    if (r2len >= broadMin)
-                    {
-                        secondBroadFound = true;
-                        break;
-                    }
+                    if (r2len >= broadMin) { secondBroadFound = true; break; }
                 }
 
                 if (secondBroadFound)
                 {
-                    int frameStart = runStart + (int)Math.Round(22.5 * samplesPerLine);
-                    Console.WriteLine($"VBI detected (inv={inverted}, thr={syncThreshold:E3}). Field1 active ≈ {frameStart}");
-                    return frameStart;
+                    // SPEC default (kept as fallback): int approx = runStart + (int)Math.Round(22.5 * samplesPerLine);
+                    // Measurement-based refinement: find first line with valid burst after V-sync
+                    int refined = RefineToFirstActiveLine(videoSignal, runStart, sampleRate, samplesPerLine);
+                    Console.WriteLine($"VBI detected (inv={inverted}). Field1 active ≈ {refined}");
+                    return refined;
                 }
             }
             // continue scanning
@@ -310,6 +639,80 @@ public class PALDecoder
         Console.WriteLine("Could not find VBI pattern, using default of 0.");
         return 0;
     }
+
+    // Find the first line after V-sync that has a strong 4.4336 MHz burst, and return its active start index.
+    private int RefineToFirstActiveLine(double[] video, int vsyncFirstBroadStart, int sampleRate, int samplesPerLine)
+    {
+        // timing (PAL)
+        int hsyncUs = (int)Math.Round(4.7e-6 * sampleRate);
+        int breezewayUs = (int)Math.Round(0.6e-6 * sampleRate);
+        int burstLen = (int)Math.Round(2.25e-6 * sampleRate);
+        int backPorchToBurst = hsyncUs + breezewayUs;
+        int desiredActiveCol = (int)Math.Round((4.7e-6 + 5.8e-6) * sampleRate);
+
+        // Examine a few dozen lines after V-sync and pick the first with strong burst
+        int firstLineIdx = Math.Max(0, (vsyncFirstBroadStart / samplesPerLine) - 1); // start a tad early
+        int lastLineIdx = Math.Min(firstLineIdx + 60, (video.Length / samplesPerLine) - 1);
+
+        // Establish a robust threshold by measuring burst energy over the candidate set
+        List<(int line, double power)> candidates = new();
+        for (int ln = firstLineIdx; ln <= lastLineIdx; ln++)
+        {
+            int lineStart = ln * samplesPerLine;
+            if (lineStart + backPorchToBurst + burstLen >= video.Length) break;
+
+            // Gate on expected burst window relative to the line start
+            int burstStart = lineStart + backPorchToBurst;
+            double p = GoertzelPower(video, burstStart, burstLen, PAL_COLOR_CARRIER_FREQ, sampleRate);
+            candidates.Add((ln, p));
+        }
+        if (candidates.Count == 0) return vsyncFirstBroadStart + (int)Math.Round(22.5 * samplesPerLine);
+
+        // Robust threshold: median + 3*MAD of burst power
+        double[] powers = candidates.Select(t => t.power).ToArray();
+        double m = Median(powers);
+        double md = Median(powers.Select(v => Math.Abs(v - m)).ToArray());
+        if (md <= 1e-20) md = (powers.Max() - powers.Min()) / 50.0;
+        double thr = m + 3.0 * md;
+
+        // First line with power above threshold (and preferably 3 consecutive hits)
+        for (int k = 0; k < candidates.Count; k++)
+        {
+            bool strong = candidates[k].power > thr;
+            bool nextStrong = (k + 1 < candidates.Count) && (candidates[k + 1].power > thr);
+            bool next2Strong = (k + 2 < candidates.Count) && (candidates[k + 2].power > thr);
+            if (strong && (nextStrong || next2Strong))
+            {
+                int ln = candidates[k].line;
+                return ln * samplesPerLine + desiredActiveCol; // return active-video start
+            }
+        }
+
+        // Fallback to the strongest burst line
+        var best = candidates.OrderByDescending(t => t.power).First();
+        return best.line * samplesPerLine + desiredActiveCol;
+    }
+
+    // Goertzel detector for burst power at subcarrier frequency in a short window
+    private static double GoertzelPower(double[] x, int offset, int length, double targetFreq, int sampleRate)
+    {
+        double w = 2 * Math.PI * targetFreq / sampleRate;
+        double cosw = Math.Cos(w);
+        double coeff = 2 * cosw;
+        double s0 = 0, s1 = 0, s2 = 0;
+
+        int end = Math.Min(offset + length, x.Length);
+        for (int n = offset; n < end; n++)
+        {
+            s0 = x[n] + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        double real = s1 - s2 * cosw;
+        double imag = s2 * Math.Sin(w);
+        return real * real + imag * imag;
+    }
+
     private static double Median(double[] a)
     {
         var b = (double[])a.Clone();
@@ -365,41 +768,42 @@ public class PALDecoder
 
     private (double[] luminance, double[] chrominance) SeparateLumaChroma(double[] videoSignal, int sampleRate, int samplesPerLine)
     {
-        // Low-pass filter for luminance (cutoff ~3 MHz)
-        double lumaCutoff = 3e6;
+        // Luma LPF (System profile)
+        double lumaCutoff = Math.Min(_profile.LumaCutoffHz, 0.45 * sampleRate); // safety vs Nyquist
         var lumaFilter = CreateLowPassFilter(lumaCutoff, sampleRate);
         double[] luminance = ApplyFilter(videoSignal, lumaFilter);
 
-        // Band-pass filter for chrominance (around 4.43 MHz)
-        double chromaLow = 3.5e6;
-        double chromaHigh = 5.5e6;
+        // Chroma BPF (tighter around 4.4336 MHz to avoid sound at +6.5 MHz in PAL-D/K)
+        double chromaLow = _profile.ChromaLowHz;
+        double chromaHigh = _profile.ChromaHighHz;
         var chromaFilter = CreateBandPassFilter(chromaLow, chromaHigh, sampleRate);
         double[] chrominance = ApplyFilter(videoSignal, chromaFilter);
 
         return (luminance, chrominance);
     }
 
-    private (double[] uComponent, double[] vComponent) DecodeChroma(double[] chrominance, int sampleRate)
+    private (double[] uComponent, double[] vComponent) DecodeChroma(double[] chrominance, int sampleRate, int samplesPerLine, int startLineOffset)
     {
         double[] uComponent = new double[chrominance.Length];
         double[] vComponent = new double[chrominance.Length];
 
-        int samplesPerLine = (int)(PAL_LINE_DURATION * sampleRate);
         var pll = new ColorPll(sampleRate);
 
         for (int i = 0; i < chrominance.Length; i++)
         {
-            int lineNumber = i / samplesPerLine;
+            int lineInBuffer = i / samplesPerLine;
             int sampleInLine = i % samplesPerLine;
 
-            // The V-axis phase is inverted on every other line
-            bool isVInverted = (lineNumber % 2 != 0);
+            // Absolute line index across the full frame
+            int absoluteLine = startLineOffset + lineInBuffer;
+
+            // PAL V-axis alternates every line; absolute parity must be used across fields
+            bool isVInverted = (absoluteLine % 2 != 0);
 
             // Get the stable, phase-locked reference carrier from the PLL
             var referenceCarrier = pll.GetReference(new Complex(chrominance[i], 0), sampleInLine, isVInverted);
             // Demodulate using the PLL's reference
             var demodulatedSample = new Complex(chrominance[i], 0) * Complex.Conjugate(referenceCarrier);
-
 
             // U demodulation (in-phase with subcarrier)
             uComponent[i] = demodulatedSample.Real;
@@ -420,7 +824,7 @@ public class PALDecoder
         // - Unwanted: High frequency components around 8.86 MHz (4.43 + 4.43) ← Noise. To remove this we apply a low-pass filter.
 
         // Low-pass filter the demodulated components
-        double chromaCutoff = 1.3e6; // Chroma bandwidth
+        double chromaCutoff = 1.3e6;
         var chromaLPF = CreateLowPassFilter(chromaCutoff, sampleRate);
         uComponent = ApplyFilter(uComponent, chromaLPF);
         vComponent = ApplyFilter(vComponent, chromaLPF);
@@ -491,41 +895,34 @@ public class PALDecoder
     private byte[,,] ConvertYUVToRGB_BT601_Optimized(double[] y, double[] u, double[] v, int samplesPerLine)
     {
         int width = Math.Min(720, samplesPerLine);
-        int height = PAL_VISIBLE_LINES;
+        int height = y.Length / samplesPerLine; // derive from buffer length
 
         byte[,,] rgbFrame = new byte[height, width, 3];
 
-        // BT.601 coefficients (precomputed for performance)
-        // Based on: Kr = 0.299, Kg = 0.587, Kb = 0.114
-        const double c_rv = 1.402;    // R from V coefficient
-        const double c_gu = -0.344;   // G from U coefficient  
-        const double c_gv = -0.714;   // G from V coefficient
-        const double c_bu = 1.772;    // B from U coefficient
+        const double c_rv = 1.402;
+        const double c_gu = -0.344;
+        const double c_gv = -0.714;
+        const double c_bu = 1.772;
 
         for (int row = 0; row < height; row++)
         {
+            int baseIdx = row * samplesPerLine;
             for (int col = 0; col < width; col++)
             {
-                int index = row * samplesPerLine + col;
+                int index = baseIdx + col;
+                double yVal = Clamp(y[index], 0, 1);
+                double uVal = Clamp(u[index], -0.5, 0.5);
+                double vVal = Clamp(v[index], -0.5, 0.5);
 
-                if (index < y.Length)
-                {
-                    double yVal = Clamp(y[index], 0, 1);
-                    double uVal = Clamp(u[index], -0.5, 0.5);
-                    double vVal = Clamp(v[index], -0.5, 0.5);
+                double r = yVal + c_rv * vVal;
+                double g = yVal + c_gu * uVal + c_gv * vVal;
+                double b = yVal + c_bu * uVal;
 
-                    // BT.601 conversion with precomputed coefficients
-                    double r = yVal + c_rv * vVal;
-                    double g = yVal + c_gu * uVal + c_gv * vVal;
-                    double b = yVal + c_bu * uVal;
-
-                    rgbFrame[row, col, 0] = (byte)(Clamp(r, 0, 1) * 255); // R
-                    rgbFrame[row, col, 1] = (byte)(Clamp(g, 0, 1) * 255); // G
-                    rgbFrame[row, col, 2] = (byte)(Clamp(b, 0, 1) * 255); // B
-                }
+                rgbFrame[row, col, 0] = (byte)(Clamp(r, 0, 1) * 255);
+                rgbFrame[row, col, 1] = (byte)(Clamp(g, 0, 1) * 255);
+                rgbFrame[row, col, 2] = (byte)(Clamp(b, 0, 1) * 255);
             }
         }
-
         return rgbFrame;
     }
 
