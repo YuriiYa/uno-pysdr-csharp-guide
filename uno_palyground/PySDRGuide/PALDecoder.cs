@@ -192,14 +192,13 @@ public class PALDecoder
                var skipUntil = frameStart + autoHOffset;
                int numberOfFrames = (videoSignal.Length - skipUntil) / samplesPerFrame;
 
-               var delta = samplesPerLine / 2;
+               var nonVideoData = (int)Math.Round((1.5 + 4.7 + 5.8) * 1e-6 * sampleRate);
+               var delta = (samplesPerLine - nonVideoData) / 2 + nonVideoData;
+
 
                for (int i = 0; i < numberOfFrames; i++)
                {
-                   Array.Copy(videoSignal, skipUntil + i * samplesPerFrame+ delta, frameData, 0, samplesPerFrame);
-
-                   // per-line horizontal alignment (aligns HSYNC→active to spec 10.5 µs)
-                   // frameData = AlignLinesInPlace(frameData, samplesPerLine, sampleRate);
+                   Array.Copy(videoSignal, skipUntil + i * samplesPerFrame + delta, frameData, 0, samplesPerFrame);
 
                    // Separate fields
                    int fieldLines = PAL_VISIBLE_LINES / 2; // 288
@@ -252,14 +251,14 @@ public class PALDecoder
 
 
                    // OPTIONAL: crop Y/U/V after decode (safe; burst already used)
-                   var activeWidth = samplesPerLine;
-                   //    (lum1, var activeWidth) = CropToActive(lum1, samplesPerLine, sampleRate);
-                   //    (u1, _) = CropToActive(u1, samplesPerLine, sampleRate);
-                   //    (v1, _) = CropToActive(v1, samplesPerLine, sampleRate);
+                   //    var activeWidth = samplesPerLine;
+                   (lum1, var activeWidth) = CropToActive(lum1, samplesPerLine, sampleRate);
+                   (u1, _) = CropToActive(u1, samplesPerLine, sampleRate);
+                   (v1, _) = CropToActive(v1, samplesPerLine, sampleRate);
 
-                   //    (lum2, _) = CropToActive(lum2, samplesPerLine, sampleRate);
-                   //    (u2, _) = CropToActive(u2, samplesPerLine, sampleRate);
-                   //    (v2, _) = CropToActive(v2, samplesPerLine, sampleRate);
+                   (lum2, _) = CropToActive(lum2, samplesPerLine, sampleRate);
+                   (u2, _) = CropToActive(u2, samplesPerLine, sampleRate);
+                   (v2, _) = CropToActive(v2, samplesPerLine, sampleRate);
 
                    // Convert each field (use activeWidth as samplesPerLine)
                    byte[,,] rgbField1 = ConvertYUVToRGB_BT601_Optimized(lum1, u1, v1, activeWidth);
@@ -276,150 +275,23 @@ public class PALDecoder
     {
         int lines = signal.Length / samplesPerLine;
         int activeWidth = (int)Math.Round(52e-6 * sampleRate);
-        int desiredActiveCol = (int)Math.Round((4.7e-6 + 5.8e-6) * sampleRate);
+        int desiredActiveCol = (int)Math.Round((4.7 + 5.8) * 1e-6 * sampleRate);
 
         // Bounds safety
-        int copyWidth = Math.Min(activeWidth, Math.Max(0, samplesPerLine - desiredActiveCol));
+        int copyWidth = Math.Max(activeWidth, Math.Max(0, samplesPerLine - desiredActiveCol));
         double[] outSig = new double[lines * copyWidth];
 
         for (int ln = 0; ln < lines; ln++)
         {
-            int src = ln * samplesPerLine + desiredActiveCol;
+            int src = ln * samplesPerLine;
             int dst = ln * copyWidth;
             Array.Copy(signal, src, outSig, dst, copyWidth);
         }
         return (outSig, copyWidth);
     }
 
-    // What it aims to do
-    // Goal: For every video line in the frame buffer, horizontally align the start of “active video” to the same column.
-    // How: Detect the horizontal sync pulse (H-sync), compute where active video should begin (H-sync + back porch), then shift the line left/right so that active video starts at a fixed index.
-    private double[] AlignLinesInPlace(double[] frameData, int samplesPerLine, int sampleRate)
-    {
-        const double HSYNC_US = 4.7e-6; // expected width of the H-sync pulse.
-        const double BACK_PORCH_US = 5.8e-6; // time between end of H-sync and the start of active video.
-        const double SEARCH_US = (30 + 10) * 1e-6; // width of the initial window at the start of each line to search for sync.
-        const int LPF_TAPS = 51; // must match LightLowPass(). FIR low-pass used to suppress 4.43 MHz chroma ripple; 
-        int gd = (LPF_TAPS - 1) / 2; // introduces group delay gd = (51−1)/2 = 25 samples.
-
-        int lines = frameData.Length / samplesPerLine; //400 000 /640 = 625
-        int searchCols = Math.Min(samplesPerLine, (int)Math.Round(SEARCH_US * sampleRate)); //300
-        int hsyncSamples = Math.Max(8, (int)Math.Round(HSYNC_US * sampleRate)); // 47/ how many samples the H-sync should span.
-        int desiredActiveCol = (int)Math.Round((HSYNC_US + BACK_PORCH_US) * sampleRate); //105 / target column for start of active video (≈10.5 µs from H-sync leading edge).
-
-        for (int ln = 0; ln < lines; ln++)
-        {
-            int lineStart = ln * samplesPerLine;
-
-            // Window + light LPF
-            double[] win = new double[searchCols];
-            Array.Copy(frameData, lineStart, win, 0, searchCols);
-            win = LightLowPass(win);
-
-            // Ensure sync negative
-            double wMin = win.Min(), wMax = win.Max();
-            if (Math.Abs(wMax) > Math.Abs(wMin))
-            {
-                for (int i = 0; i < win.Length; i++) win[i] = -win[i];
-                (wMin, wMax) = (-wMax, -wMin);
-            }
-
-            // Moving-sum over HSYNC to find deepest segment
-            int bestStart = -1;
-            double sum = 0, bestSum = double.PositiveInfinity;
-            int L = hsyncSamples, N = win.Length;
-
-            // Slide a window of L = hsyncSamples across win and compute the sum.
-            if (L <= N)
-            {
-                for (int i = 0; i < L; i++) sum += win[i];
-                bestSum = sum; bestStart = 0;
-                for (int i = L; i < N; i++)
-                {
-                    sum += win[i] - win[i - L];
-                    if (sum < bestSum)
-                    {
-                        bestSum = sum;
-                        bestStart = i - L + 1;
-                    }
-                }
-            }
-
-            int activeCol = -1;
-            if (bestStart >= 0)
-            {
-                // Threshold refine and group-delay compensate
-                double med = Median(win);
-                double mad = Median(win.Select(v => Math.Abs(v - med)).ToArray());
-                if (mad <= 1e-12) mad = (wMax - wMin) / 50.0;
-                double thr = med - 2.5 * mad;
-
-                int rs = bestStart;
-                while (rs > 0 && win[rs - 1] < thr) rs--;
-                int re = Math.Min(N - 1, bestStart + L - 1);
-                while (re + 1 < N && win[re + 1] < thr) re++;
-
-                int syncStartCol = Math.Max(0, rs - gd);
-                activeCol = syncStartCol + (int)Math.Round((HSYNC_US + BACK_PORCH_US) * sampleRate);
-            }
-            else
-            {
-                // Edge fallback + GD compensation
-                int edgeIdx = -1;
-                double minDer = double.PositiveInfinity;
-                for (int i = 1; i < N; i++)
-                {
-                    double d = win[i] - win[i - 1];
-                    if (d < minDer) { minDer = d; edgeIdx = i; }
-                }
-                if (edgeIdx > 0)
-                {
-                    int syncEdge = Math.Max(0, edgeIdx - gd);
-                    activeCol = syncEdge + (int)Math.Round((HSYNC_US + BACK_PORCH_US) * sampleRate);
-                }
-            }
-
-            if (activeCol <= 0) continue;
-
-            // Compute per-line shift so active starts at desiredActiveCol
-            int delta = desiredActiveCol - activeCol; // >0 shift right, <0 shift left
-            if (delta == 0) continue;
-
-            if (delta < 0)
-            {
-                double[] adjustedVideo = new double[frameData.Length];
-                Array.Copy(frameData, -delta, adjustedVideo, 0, frameData.Length - Math.Abs(delta));
-
-                for (int i = frameData.Length - Math.Abs(delta); i < adjustedVideo.Length; i++)
-                    adjustedVideo[i] = 0;
-
-                return adjustedVideo;
-            }
-
-            /*
-                if (delta > 0)
-                {
-                    for (int i = samplesPerLine - 1; i >= delta; i--)
-                        frameData[lineStart + i] = frameData[lineStart + i - delta];
-                    for (int i = 0; i < delta; i++)
-                        frameData[lineStart + i] = 0;
-                }
-                else
-                {
-                    delta = -delta;
-                    for (int i = 0; i < samplesPerLine - delta; i++)
-                        frameData[lineStart + i] = frameData[lineStart + i + delta];
-                    for (int i = samplesPerLine - delta; i < samplesPerLine; i++)
-                        frameData[lineStart + i] = 0;
-                }*/
-        }
-
-        return frameData;
-    }
-
     // auto-find the horizontal start by detecting the H-sync pulse per line and computing the active-video start from timing 
     // (4.7 µs sync + 5.8 µs back porch). 
-    // Then replace your manual +80 with a measured global offset.
     private int EstimateHorizontalOffset(double[] videoSignal, int frameStart, int samplesPerLine, int sampleRate, int linesToUse = 24)
     {
         const double HSYNC_US = 4.7e-6;
@@ -923,41 +795,6 @@ public class PALDecoder
                 rgbFrame[row, col, 2] = (byte)(Clamp(b, 0, 1) * 255);
             }
         }
-        return rgbFrame;
-    }
-
-    private byte[,,] ConvertYUVToRGB(double[] y, double[] u, double[] v, int samplesPerLine)
-    {
-        int width = Math.Min(720, samplesPerLine); // Standard PAL width
-        int height = PAL_VISIBLE_LINES;
-
-        byte[,,] rgbFrame = new byte[height, width, 3]; // RGB
-
-        for (int row = 0; row < height; row++)
-        {
-            for (int col = 0; col < width; col++)
-            {
-                int index = row * samplesPerLine + col;
-
-                if (index < y.Length)
-                {
-                    // YUV to RGB conversion
-                    double yVal = Clamp(y[index], 0, 1);
-                    double uVal = Clamp(u[index], -0.5, 0.5);
-                    double vVal = Clamp(v[index], -0.5, 0.5);
-
-                    // ITU-R BT.601 conversion
-                    double r = yVal + 1.402 * vVal;
-                    double g = yVal - 0.344 * uVal - 0.714 * vVal;
-                    double b = yVal + 1.772 * uVal;
-
-                    rgbFrame[row, col, 0] = (byte)(Clamp(r, 0, 1) * 255); // R
-                    rgbFrame[row, col, 1] = (byte)(Clamp(g, 0, 1) * 255); // G
-                    rgbFrame[row, col, 2] = (byte)(Clamp(b, 0, 1) * 255); // B
-                }
-            }
-        }
-
         return rgbFrame;
     }
 

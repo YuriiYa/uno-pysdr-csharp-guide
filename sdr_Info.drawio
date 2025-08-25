@@ -492,7 +492,7 @@
         <mxCell id="n9YqHZqSXgJRUGCfHLcp-4" value="Back Porch&lt;div&gt;5.8ms&lt;/div&gt;&lt;div&gt;0v&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
           <mxGeometry x="4010" y="5409" width="340" height="41" as="geometry" />
         </mxCell>
-        <mxCell id="n9YqHZqSXgJRUGCfHLcp-5" value="Active video&lt;div&gt;luma (0v to 0.7V + Chroma (subcarier)&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
+        <mxCell id="n9YqHZqSXgJRUGCfHLcp-5" value="Active video&lt;div&gt;52ms&lt;br&gt;&lt;div&gt;luma (0v to 0.7V + Chroma (subcarier)&lt;/div&gt;&lt;/div&gt;" style="rounded=0;whiteSpace=wrap;html=1;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
           <mxGeometry x="4350" y="5409" width="450" height="81" as="geometry" />
         </mxCell>
         <mxCell id="n9YqHZqSXgJRUGCfHLcp-137" value="A brief, stable period of black level that ensures the previous line&amp;#39;s active video has finished before the critical sync pulse arrives. It allows the receiver&amp;#39;s circuitry to prepare for the sync." style="shape=note;backgroundOutline=1;fontColor=#000000;darkOpacity=0.05;fillColor=#FFF9B2;strokeColor=none;fillStyle=solid;direction=west;gradientDirection=north;gradientColor=#FFF2A1;shadow=1;size=20;pointerEvents=1;align=left;html=1;whiteSpace=wrap;spacingTop=1;spacing=11;" vertex="1" parent="UxEVvuUElZgrL1N4Tevr-11">
