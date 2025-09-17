@@ -41,13 +41,31 @@ public sealed partial class MainPage : Page
         /*var videoFileExample = new VideoFromFile(WinUIPlot1.Plot, WinUIPlotModulation.Plot);
         videoFileExample.DoShowVideoFile();*/
 
-        DecodePALVideo(WinUIPlot1.Plot);
+        DecodePALVideoAsync(WinUIPlot1.Plot);
     }
 
+    private Task DecodePALVideoAsync(Plot plot)
+    {
+        return Task.Factory.StartNew(() =>
+           {
+               try
+               {
+
+                   DecodePALVideo(plot);
+               }
+               catch (Exception ex)
+               {
+                   Console.WriteLine($"Decode error: {ex}");
+               }
+           }, TaskCreationOptions.LongRunning);
+    }
 
     public void DecodePALVideo(Plot plot)
     {
         var filename = @"C:\projects\sdr\RFData\SDRSharp_20170122_171736Z_179100000Hz_IQ.wav";
+        // for debian
+        // var filename = @"/home/pi5-dos/SDRProj/video/SDRSharp_20170122_171736Z_179100000Hz_IQ.wav";
+       
         var samples = Numpy.np.fromfile(filename, Numpy.np.int16);
 
         var int16Header = samples[":22"].real.GetData<Int16>();
