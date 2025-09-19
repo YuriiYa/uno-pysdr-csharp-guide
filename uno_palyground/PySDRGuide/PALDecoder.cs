@@ -1,6 +1,7 @@
 using ScottPlot;
 using System.Numerics;
 using Microsoft.UI.Dispatching;
+using uno_palyground.PySDRGuide;
 
 // PAL D type parameters:
 
@@ -171,32 +172,62 @@ public class PALDecoder
         _fieldOrder = fieldOrder;
     }
 
-    public void DecodePALSignal(Complex[] iqSamples, int sampleRate)
+    public void DecodePALSignal(int sampleRate, FileStream fs)
     {
-        int samplesPerLine = (int)(PAL_LINE_DURATION * sampleRate); // 640
-        int samplesPerFrame = samplesPerLine * PAL_LINES_PER_FRAME; //400000
+        int samplesPerLine = (int)(PAL_LINE_DURATION * sampleRate); // expected ≈ 64e-6 * fs
+        int samplesPerFrame = samplesPerLine * PAL_LINES_PER_FRAME;  // samples in one full frame
+        long bytesPerFrame = (long)samplesPerFrame * 4; // 4 bytes per complex sample (I16 + Q16)
 
-        double[] videoSignal = AMDemodulation(iqSamples);
-        int frameStart = FindFrameStart(videoSignal, sampleRate, samplesPerLine);
-
-        if (frameStart + samplesPerFrame > videoSignal.Length)
+        // Read one full frame worth (or as much as available) for sync analysis
+        Complex[] firstFrame = IQWavReader.ReadIQWavNext(fs, bytesPerFrame);
+        if (firstFrame.Length == 0)
         {
-            Console.WriteLine("Not enough samples for a complete PAL frame after sync");
-            samplesPerFrame = videoSignal.Length - frameStart;
+            Console.WriteLine("No samples available for PAL decoding.");
+            return;
+        }
+        if (firstFrame.Length < samplesPerFrame)
+        {
+            Console.WriteLine($"First chunk smaller than one frame: have {firstFrame.Length}, need {samplesPerFrame}. Aborting.");
+            return; // Need a complete initial frame for stable sync detection.
         }
 
-        double[] frameData = new double[samplesPerFrame];
+        double[] videoSignal = AMDemodulation(firstFrame);
+        int frameStart = FindFrameStart(videoSignal, sampleRate, samplesPerLine);
         int autoHOffset = EstimateHorizontalOffset(videoSignal, frameStart, samplesPerLine, sampleRate);
-        var skipUntil = frameStart + autoHOffset;
-        int numberOfFrames = (videoSignal.Length - skipUntil) / samplesPerFrame;
+        int skipUntil = frameStart + autoHOffset; // in samples
 
         var nonVideoData = (int)Math.Round((1.5 + 4.7 + 5.8) * 1e-6 * sampleRate);
         var delta = (samplesPerLine - nonVideoData) / 2 + nonVideoData;
+        if (skipUntil < 0) skipUntil = 0;
+        if (skipUntil > samplesPerFrame) skipUntil = samplesPerFrame;
 
+        // We already consumed the first frame from the stream.
+        // For simplicity we drop it after using it for sync (could reuse remaining part later if wanted).
+        // Advance stream additional 'skipUntil' samples relative to NEXT frames (since first frame discarded):
+        // (If you want to reuse the first frame's active area, refactor instead of skipping here.)
+        IQWavReader.SkipBytes(fs, (long)skipUntil * 4);
+        // align frame horizontally by skipping non video data
+        IQWavReader.SkipBytes(fs, (long)delta * 4);
 
-        for (int i = 0; i < numberOfFrames; i++)
+        long remainingComplexSamples = (fs.Length - fs.Position) / 4; // remaining samples in file
+        long numberOfFrames = remainingComplexSamples / samplesPerFrame;
+        if (numberOfFrames <= 0)
         {
-            Array.Copy(videoSignal, skipUntil + i * samplesPerFrame + delta, frameData, 0, samplesPerFrame);
+            Console.WriteLine("No complete frames remain after initial sync frame.");
+            return;
+        }
+
+        Console.WriteLine($"Decoding {numberOfFrames} frames (samplesPerLine={samplesPerLine}, samplesPerFrame={samplesPerFrame}).");
+
+        for (long frameIndex = 0; frameIndex < numberOfFrames; frameIndex++)
+        {
+            Complex[] iqSamples = IQWavReader.ReadIQWavNext(fs, bytesPerFrame);
+            if (iqSamples.Length < samplesPerFrame)
+            {
+                Console.WriteLine($"Short read at frame {frameIndex}; expected {samplesPerFrame}, got {iqSamples.Length}. Stopping.");
+                break;
+            }
+            double[] frameData = AMDemodulation(iqSamples);
 
             // Separate fields
             int fieldLines = PAL_VISIBLE_LINES / 2; // 288
@@ -223,21 +254,26 @@ public class PALDecoder
             double[] field1 = new double[fieldLines * samplesPerLine];
             double[] field2 = new double[fieldLines * samplesPerLine];
 
+            int availableLines = frameData.Length / samplesPerLine;
+            if (availableLines < (field2StartLine + fieldLinesVis))
+            {
+                Console.WriteLine($"Frame {frameIndex}: insufficient lines (available={availableLines}) for expected second field start {field2StartLine}. Skipping frame.");
+                continue;
+            }
+
             for (int j = 0; j < fieldLinesVis; j++)
             {
                 // Field 1: contiguous lines
-                Array.Copy(
-                    frameData, (field1StartLine + j) * samplesPerLine,
-                    field1, j * samplesPerLine,
-                    samplesPerLine
-                );
+                int src1 = (field1StartLine + j) * samplesPerLine;
+                int dst1 = j * samplesPerLine;
+                if (src1 + samplesPerLine > frameData.Length) break; // safety
+                Array.Copy(frameData, src1, field1, dst1, samplesPerLine);
 
                 // Field 2: next contiguous block (half-frame later)
-                Array.Copy(
-                    frameData, (field2StartLine + j) * samplesPerLine,
-                    field2, j * samplesPerLine,
-                    samplesPerLine
-                );
+                int src2 = (field2StartLine + j) * samplesPerLine;
+                int dst2 = j * samplesPerLine;
+                if (src2 + samplesPerLine > frameData.Length) break; // safety
+                Array.Copy(frameData, src2, field2, dst2, samplesPerLine);
             }
             // Process each field
             var (lum1, chr1) = SeparateLumaChroma(field1, sampleRate, samplesPerLine);

@@ -65,22 +65,28 @@ public sealed partial class MainPage : Page
         var filename = @"C:\projects\sdr\RFData\SDRSharp_20170122_171736Z_179100000Hz_IQ.wav";
         // for debian
         // var filename = @"/home/pi5-dos/SDRProj/video/SDRSharp_20170122_171736Z_179100000Hz_IQ.wav";
-       
-        var samples = Numpy.np.fromfile(filename, Numpy.np.int16);
 
-        var int16Header = samples[":22"].real.GetData<Int16>();
-        WavHeader header = WavHelper.ConvertByteArraytoType<WavHeader>(int16Header);
+        if (!File.Exists(filename))
+            throw new FileNotFoundException("IQ WAV file not found", filename);
+
+        using var fs = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (fs.Length < 44)
+            throw new InvalidDataException("File too small to be a valid WAV");
+
+        // 1. Read header (44 bytes standard PCM WAV header)
+        byte[] headerBytes = new byte[44];
+        int read = fs.Read(headerBytes, 0, 44);
+        if (read != 44)
+            throw new EndOfStreamException("Could not read complete WAV header");
+
+        var header = WavHelper.ConvertByteArraytoType<WavHeader>(headerBytes);
         WavHelper.PrintWavHeader(header);
-
-        samples = samples["22:"]; // Skip WAV header
-
-        var iqSamples = VideoFromFile.ConvertToIQ(samples.real.GetData<Int16>());
 
         // Initialize PAL decoder
         var palDecoder = new PALDecoder(plot, DispatcherQueue);
 
         // Decode PAL signal (assuming 10 MHz sample rate)
-        palDecoder.DecodePALSignal(iqSamples, sampleRate: 10000000);
+        palDecoder.DecodePALSignal( sampleRate: 10000000, fs);
     }
 
 }
