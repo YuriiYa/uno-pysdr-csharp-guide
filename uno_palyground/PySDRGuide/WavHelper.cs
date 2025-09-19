@@ -20,6 +20,19 @@ public class WavHelper
         Console.WriteLine($"DataFileSize: {header.DataFileSize}");
     }
 
+    public static WavHeader ReadWavHeader(FileStream fs)
+    { 
+        if (fs.Length < 44)
+            throw new InvalidDataException("File too small to be a valid WAV");
+
+        byte[] headerBytes = new byte[44];
+        int read = fs.Read(headerBytes, 0, 44);
+        if (read != 44)
+            throw new EndOfStreamException("Could not read complete WAV header");
+
+        return ConvertByteArraytoType<WavHeader>(headerBytes);
+    }
+
     public static TType? ConvertByteArraytoType<TType>(Int16[] int16Header)
     {
         byte[] byteHeader = new byte[int16Header.Length * sizeof(Int16)];

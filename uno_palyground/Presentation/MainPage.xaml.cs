@@ -70,16 +70,8 @@ public sealed partial class MainPage : Page
             throw new FileNotFoundException("IQ WAV file not found", filename);
 
         using var fs = new FileStream(filename, FileMode.Open, FileAccess.Read, FileShare.Read);
-        if (fs.Length < 44)
-            throw new InvalidDataException("File too small to be a valid WAV");
 
-        // 1. Read header (44 bytes standard PCM WAV header)
-        byte[] headerBytes = new byte[44];
-        int read = fs.Read(headerBytes, 0, 44);
-        if (read != 44)
-            throw new EndOfStreamException("Could not read complete WAV header");
-
-        var header = WavHelper.ConvertByteArraytoType<WavHeader>(headerBytes);
+        var header = WavHelper.ReadWavHeader(fs);
         WavHelper.PrintWavHeader(header);
 
         // Initialize PAL decoder
