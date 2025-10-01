@@ -175,23 +175,17 @@ public class PALDecoder
     public void DecodePALSignal(int sampleRate, FileStream fs)
     {
         int samplesPerLine = (int)(PAL_LINE_DURATION * sampleRate); // expected ≈ 64e-6 * fs
-        int samplesPerFrame = samplesPerLine * PAL_LINES_PER_FRAME;  // samples in one full frame
-        long bytesPerFrame = (long)samplesPerFrame * 4; // 4 bytes per complex sample (I16 + Q16)
+        int samplesPerFrame = samplesPerLine * PAL_LINES_PER_FRAME;  // Complex samples per full frame
 
-        // Read one full frame worth (or as much as available) for sync analysis
-        Complex[] firstFrame = IQWavReader.ReadIQWavNext(fs, bytesPerFrame);
-        if (firstFrame.Length == 0)
+        // Configure ring buffer (2 frames capacity gives margin for wrap)
+        try { IQWavReader.ConfigureRingBuffer(samplesPerFrame * 2); } catch { /* ignore */ }
+
+        double[] videoSignal = new double[samplesPerFrame];
+        if (!ReadAndDemodFrame(fs, samplesPerFrame, videoSignal))
         {
-            Console.WriteLine("No samples available for PAL decoding.");
+            Console.WriteLine("No samples available for PAL decoding (initial frame).");
             return;
         }
-        if (firstFrame.Length < samplesPerFrame)
-        {
-            Console.WriteLine($"First chunk smaller than one frame: have {firstFrame.Length}, need {samplesPerFrame}. Aborting.");
-            return; // Need a complete initial frame for stable sync detection.
-        }
-
-        double[] videoSignal = AMDemodulation(firstFrame);
         int frameStart = FindFrameStart(videoSignal, sampleRate, samplesPerLine);
         int autoHOffset = EstimateHorizontalOffset(videoSignal, frameStart, samplesPerLine, sampleRate);
         int skipUntil = frameStart + autoHOffset; // in samples
@@ -205,9 +199,9 @@ public class PALDecoder
         // For simplicity we drop it after using it for sync (could reuse remaining part later if wanted).
         // Advance stream additional 'skipUntil' samples relative to NEXT frames (since first frame discarded):
         // (If you want to reuse the first frame's active area, refactor instead of skipping here.)
-        IQWavReader.SkipBytes(fs, (long)skipUntil * 4);
+    SkipSamplesStreaming(fs, skipUntil);
         // align frame horizontally by skipping non video data
-        IQWavReader.SkipBytes(fs, (long)delta * 4);
+    SkipSamplesStreaming(fs, delta);
 
         long remainingComplexSamples = (fs.Length - fs.Position) / 4; // remaining samples in file
         long numberOfFrames = remainingComplexSamples / samplesPerFrame;
@@ -219,15 +213,15 @@ public class PALDecoder
 
         Console.WriteLine($"Decoding {numberOfFrames} frames (samplesPerLine={samplesPerLine}, samplesPerFrame={samplesPerFrame}).");
 
+        double[] frameData = new double[samplesPerFrame];
         for (long frameIndex = 0; frameIndex < numberOfFrames; frameIndex++)
         {
-            Complex[] iqSamples = IQWavReader.ReadIQWavNext(fs, bytesPerFrame);
-            if (iqSamples.Length < samplesPerFrame)
+            Console.WriteLine($"Decoding frame {frameIndex + 1}/{numberOfFrames}...");
+            if (!ReadAndDemodFrame(fs, samplesPerFrame, frameData))
             {
-                Console.WriteLine($"Short read at frame {frameIndex}; expected {samplesPerFrame}, got {iqSamples.Length}. Stopping.");
+                Console.WriteLine($"Short read at frame {frameIndex}; expected {samplesPerFrame} samples. Stopping.");
                 break;
             }
-            double[] frameData = AMDemodulation(iqSamples);
 
             // Separate fields
             int fieldLines = PAL_VISIBLE_LINES / 2; // 288
@@ -301,6 +295,51 @@ public class PALDecoder
             // Interleave fields for display
             byte[,,] rgbFrame = InterleaveFields(rgbField1, rgbField2);
             DisplayVideoFrame(rgbFrame);
+        }
+    }
+
+    // Streaming reader + AM magnitude demodulation into provided buffer.
+    // Returns false if EOF before filling buffer.
+    private bool ReadAndDemodFrame(FileStream fs, int samplesPerFrame, double[] frameBuffer)
+    {
+        int filled = 0;
+        double sum = 0;
+        while (filled < samplesPerFrame)
+        {
+            int need = samplesPerFrame - filled;
+            var seg = IQWavReader.ReadIQIntoRingOptimized(fs, need);
+            if (seg.IsEmpty) break; // EOF
+
+            var first = seg.First;
+            for (int i = 0; i < first.Length; i++)
+            {
+                double mag = first[i].Magnitude;
+                frameBuffer[filled++] = mag;
+                sum += mag;
+            }
+            var second = seg.Second;
+            for (int i = 0; i < second.Length && filled < samplesPerFrame; i++)
+            {
+                double mag = second[i].Magnitude;
+                frameBuffer[filled++] = mag;
+                sum += mag;
+            }
+        }
+        if (filled < samplesPerFrame) return false;
+        double dc = sum / samplesPerFrame;
+        for (int i = 0; i < samplesPerFrame; i++) frameBuffer[i] -= dc;
+        return true;
+    }
+
+    private void SkipSamplesStreaming(FileStream fs, int samplesToSkip)
+    {
+        int remaining = samplesToSkip;
+        while (remaining > 0)
+        {
+            int chunk = Math.Min(remaining, 8192);
+            var seg = IQWavReader.ReadIQIntoRingOptimized(fs, chunk);
+            if (seg.IsEmpty) break; // EOF
+            remaining -= seg.SamplesRead;
         }
     }
 
@@ -844,8 +883,16 @@ public class PALDecoder
         return rgbFrame;
     }
 
+    private readonly Dictionary<string, double[]> _filterCache = new();
+
     private double[] CreateLowPassFilter(double cutoffFreq, int sampleRate)
     {
+        string filterKey = $"LPF_{cutoffFreq}_{sampleRate}";
+        _filterCache.TryGetValue(filterKey, out var cached);
+        if (cached != null) {
+            return cached;
+        }
+
         // Simple FIR low-pass filter
         int filterLength = 101;
         double[] filter = new double[filterLength];
@@ -863,6 +910,7 @@ public class PALDecoder
             filter[i] *= 0.54 - 0.46 * Math.Cos(2 * Math.PI * i / (filterLength - 1));
         }
 
+        _filterCache.Add(filterKey, filter);
         return filter;
     }
 

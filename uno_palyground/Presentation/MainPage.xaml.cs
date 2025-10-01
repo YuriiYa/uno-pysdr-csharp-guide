@@ -78,7 +78,22 @@ public sealed partial class MainPage : Page
         var palDecoder = new PALDecoder(plot, DispatcherQueue);
 
         // Decode PAL signal (assuming 10 MHz sample rate)
-        palDecoder.DecodePALSignal( sampleRate: 10000000, fs);
+        // Ring buffer size: 2 frames worth (approx). Reserve after reading header so we know sample rate.
+        int samplesPerLine = (int)(PALDecoder.PAL_LINE_DURATION * 10000000);
+        int samplesPerFrame = samplesPerLine * PALDecoder.PAL_LINES_PER_FRAME;
+        uno_palyground.PySDRGuide.IQWavReader.ConfigureRingBuffer(samplesPerFrame * 2);
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        palDecoder.DecodePALSignal(sampleRate: 10000000, fs);
+        watch.Stop();
+        var elapsedMs = watch.ElapsedMilliseconds;
+        TimeSpan t = TimeSpan.FromMilliseconds(elapsedMs);
+        string answer = string.Format("{0:D2}h:{1:D2}m:{2:D2}s:{3:D3}ms",
+                        t.Hours,
+                        t.Minutes,
+                        t.Seconds,
+                        t.Milliseconds);
+        Console.WriteLine($"Decoding finished in {answer}");
     }
 
 }
