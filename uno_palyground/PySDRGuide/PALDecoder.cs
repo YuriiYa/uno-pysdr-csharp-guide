@@ -199,9 +199,9 @@ public class PALDecoder
         // For simplicity we drop it after using it for sync (could reuse remaining part later if wanted).
         // Advance stream additional 'skipUntil' samples relative to NEXT frames (since first frame discarded):
         // (If you want to reuse the first frame's active area, refactor instead of skipping here.)
-    SkipSamplesStreaming(fs, skipUntil);
+        SkipSamplesStreaming(fs, skipUntil);
         // align frame horizontally by skipping non video data
-    SkipSamplesStreaming(fs, delta);
+        SkipSamplesStreaming(fs, delta);
 
         long remainingComplexSamples = (fs.Length - fs.Position) / 4; // remaining samples in file
         long numberOfFrames = remainingComplexSamples / samplesPerFrame;
@@ -216,84 +216,98 @@ public class PALDecoder
         double[] frameData = new double[samplesPerFrame];
         for (long frameIndex = 0; frameIndex < numberOfFrames; frameIndex++)
         {
-            Console.WriteLine($"Decoding frame {frameIndex + 1}/{numberOfFrames}...");
-            if (!ReadAndDemodFrame(fs, samplesPerFrame, frameData))
+            byte[,,] rgbFrame = null;
+            var stateResult = TimeLapseHelper.PrintTime(() =>
             {
-                Console.WriteLine($"Short read at frame {frameIndex}; expected {samplesPerFrame} samples. Stopping.");
-                break;
+                Console.WriteLine($"Decoding frame {frameIndex + 1}/{numberOfFrames}...");
+                if (!ReadAndDemodFrame(fs, samplesPerFrame, frameData))
+                {
+                    Console.WriteLine($"Short read at frame {frameIndex}; expected {samplesPerFrame} samples. Stopping.");
+                    return (breakResult: true, continueResult: false);
+                }
+
+                // Separate fields
+                int fieldLines = PAL_VISIBLE_LINES / 2; // 288
+                                                        // After you fill frameData with exactly one PAL frame (625 lines worth) OR one visible frame window,
+                                                        // split fields as contiguous blocks, not every-other-line.
+                int linesPerFieldAll = PAL_LINES_PER_FRAME / 2;   // 312
+                int fieldLinesVis = PAL_VISIBLE_LINES / 2;        // 288
+
+                // If frameStart already points to Field-1 active top, use 0 and +linesPerFieldAll.
+                // Otherwise add per-field VBI offsets (~22–25 lines) to land on active video:
+                // const int VBI_LINES_FIELD1 = 23;
+                // const int VBI_LINES_FIELD2 = 23;
+
+                // Choose one of the two strategies:
+
+                // Strategy A: frameData starts at Field-1 active line 0
+                int field1StartLine = 0;
+                int field2StartLine = linesPerFieldAll;
+
+                // Strategy B: frameData starts at the very beginning of the frame (includes VBI)
+                //int field1StartLine = VBI_LINES_FIELD1;
+                //int field2StartLine = linesPerFieldAll + VBI_LINES_FIELD2;
+
+                double[] field1 = new double[fieldLines * samplesPerLine];
+                double[] field2 = new double[fieldLines * samplesPerLine];
+
+                int availableLines = frameData.Length / samplesPerLine;
+                if (availableLines < (field2StartLine + fieldLinesVis))
+                {
+                    Console.WriteLine($"Frame {frameIndex}: insufficient lines (available={availableLines}) for expected second field start {field2StartLine}. Skipping frame.");
+                    return (breakResult: false, continueResult: true);
+                }
+
+                for (int j = 0; j < fieldLinesVis; j++)
+                {
+                    // Field 1: contiguous lines
+                    int src1 = (field1StartLine + j) * samplesPerLine;
+                    int dst1 = j * samplesPerLine;
+                    if (src1 + samplesPerLine > frameData.Length) break; // safety
+                    Array.Copy(frameData, src1, field1, dst1, samplesPerLine);
+
+                    // Field 2: next contiguous block (half-frame later)
+                    int src2 = (field2StartLine + j) * samplesPerLine;
+                    int dst2 = j * samplesPerLine;
+                    if (src2 + samplesPerLine > frameData.Length) break; // safety
+                    Array.Copy(frameData, src2, field2, dst2, samplesPerLine);
+                }
+                // Process each field
+                var (lum1, chr1) = SeparateLumaChroma(field1, sampleRate, samplesPerLine);
+                var (lum2, chr2) = SeparateLumaChroma(field2, sampleRate, samplesPerLine);
+
+                // Use absolute line offsets for V-axis alternation (preserves 8-field parity across fields)
+                var (u1, v1) = DecodeChroma(chr1, sampleRate, samplesPerLine, startLineOffset: field1StartLine);
+                var (u2, v2) = DecodeChroma(chr2, sampleRate, samplesPerLine, startLineOffset: field2StartLine);
+
+
+                // OPTIONAL: crop Y/U/V after decode (safe; burst already used)
+                //    var activeWidth = samplesPerLine;
+                (lum1, var activeWidth) = CropToActive(lum1, samplesPerLine, sampleRate);
+                (u1, _) = CropToActive(u1, samplesPerLine, sampleRate);
+                (v1, _) = CropToActive(v1, samplesPerLine, sampleRate);
+
+                (lum2, _) = CropToActive(lum2, samplesPerLine, sampleRate);
+                (u2, _) = CropToActive(u2, samplesPerLine, sampleRate);
+                (v2, _) = CropToActive(v2, samplesPerLine, sampleRate);
+
+                // Convert each field (use activeWidth as samplesPerLine)
+                byte[,,] rgbField1 = ConvertYUVToRGB_BT601_Optimized(lum1, u1, v1, activeWidth);
+                byte[,,] rgbField2 = ConvertYUVToRGB_BT601_Optimized(lum2, u2, v2, activeWidth);
+
+                // Interleave fields for display
+                rgbFrame = InterleaveFields(rgbField1, rgbField2);
+                return (breakResult: false, continueResult: false);
+            });
+            if (stateResult.breakResult) break;
+            if (stateResult.continueResult) continue;
+
+            if (rgbFrame == null)
+            {
+                Console.WriteLine($"Frame {frameIndex}: failed to interleave fields.");
+                continue; // short read or error
             }
 
-            // Separate fields
-            int fieldLines = PAL_VISIBLE_LINES / 2; // 288
-                                                    // After you fill frameData with exactly one PAL frame (625 lines worth) OR one visible frame window,
-                                                    // split fields as contiguous blocks, not every-other-line.
-            int linesPerFieldAll = PAL_LINES_PER_FRAME / 2;   // 312
-            int fieldLinesVis = PAL_VISIBLE_LINES / 2;        // 288
-
-            // If frameStart already points to Field-1 active top, use 0 and +linesPerFieldAll.
-            // Otherwise add per-field VBI offsets (~22–25 lines) to land on active video:
-            // const int VBI_LINES_FIELD1 = 23;
-            // const int VBI_LINES_FIELD2 = 23;
-
-            // Choose one of the two strategies:
-
-            // Strategy A: frameData starts at Field-1 active line 0
-            int field1StartLine = 0;
-            int field2StartLine = linesPerFieldAll;
-
-            // Strategy B: frameData starts at the very beginning of the frame (includes VBI)
-            //int field1StartLine = VBI_LINES_FIELD1;
-            //int field2StartLine = linesPerFieldAll + VBI_LINES_FIELD2;
-
-            double[] field1 = new double[fieldLines * samplesPerLine];
-            double[] field2 = new double[fieldLines * samplesPerLine];
-
-            int availableLines = frameData.Length / samplesPerLine;
-            if (availableLines < (field2StartLine + fieldLinesVis))
-            {
-                Console.WriteLine($"Frame {frameIndex}: insufficient lines (available={availableLines}) for expected second field start {field2StartLine}. Skipping frame.");
-                continue;
-            }
-
-            for (int j = 0; j < fieldLinesVis; j++)
-            {
-                // Field 1: contiguous lines
-                int src1 = (field1StartLine + j) * samplesPerLine;
-                int dst1 = j * samplesPerLine;
-                if (src1 + samplesPerLine > frameData.Length) break; // safety
-                Array.Copy(frameData, src1, field1, dst1, samplesPerLine);
-
-                // Field 2: next contiguous block (half-frame later)
-                int src2 = (field2StartLine + j) * samplesPerLine;
-                int dst2 = j * samplesPerLine;
-                if (src2 + samplesPerLine > frameData.Length) break; // safety
-                Array.Copy(frameData, src2, field2, dst2, samplesPerLine);
-            }
-            // Process each field
-            var (lum1, chr1) = SeparateLumaChroma(field1, sampleRate, samplesPerLine);
-            var (lum2, chr2) = SeparateLumaChroma(field2, sampleRate, samplesPerLine);
-
-            // Use absolute line offsets for V-axis alternation (preserves 8-field parity across fields)
-            var (u1, v1) = DecodeChroma(chr1, sampleRate, samplesPerLine, startLineOffset: field1StartLine);
-            var (u2, v2) = DecodeChroma(chr2, sampleRate, samplesPerLine, startLineOffset: field2StartLine);
-
-
-            // OPTIONAL: crop Y/U/V after decode (safe; burst already used)
-            //    var activeWidth = samplesPerLine;
-            (lum1, var activeWidth) = CropToActive(lum1, samplesPerLine, sampleRate);
-            (u1, _) = CropToActive(u1, samplesPerLine, sampleRate);
-            (v1, _) = CropToActive(v1, samplesPerLine, sampleRate);
-
-            (lum2, _) = CropToActive(lum2, samplesPerLine, sampleRate);
-            (u2, _) = CropToActive(u2, samplesPerLine, sampleRate);
-            (v2, _) = CropToActive(v2, samplesPerLine, sampleRate);
-
-            // Convert each field (use activeWidth as samplesPerLine)
-            byte[,,] rgbField1 = ConvertYUVToRGB_BT601_Optimized(lum1, u1, v1, activeWidth);
-            byte[,,] rgbField2 = ConvertYUVToRGB_BT601_Optimized(lum2, u2, v2, activeWidth);
-
-            // Interleave fields for display
-            byte[,,] rgbFrame = InterleaveFields(rgbField1, rgbField2);
             DisplayVideoFrame(rgbFrame);
         }
     }
@@ -889,7 +903,8 @@ public class PALDecoder
     {
         string filterKey = $"LPF_{cutoffFreq}_{sampleRate}";
         _filterCache.TryGetValue(filterKey, out var cached);
-        if (cached != null) {
+        if (cached != null)
+        {
             return cached;
         }
 

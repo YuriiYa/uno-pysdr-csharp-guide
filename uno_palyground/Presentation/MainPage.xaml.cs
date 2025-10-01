@@ -6,6 +6,36 @@ using HackRF.Namespace;
 
 namespace uno_palyground.Presentation;
 
+public static class TimeLapseHelper
+{
+    public static void PrintTime(Action action)
+    {
+       _ = PrintTime(() =>
+        {
+            action();
+             return (false, false);
+        }); 
+    }
+
+    public static (bool breakResult, bool continueResult) PrintTime(Func<(bool breakResult, bool continueResult)> action)
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        var result = action();
+        watch.Stop();
+
+        var elapsedMs = watch.ElapsedMilliseconds;
+        TimeSpan t = TimeSpan.FromMilliseconds(elapsedMs);
+        string answer = string.Format("{0:D2}h:{1:D2}m:{2:D2}s:{3:D3}ms - time of {4}",
+                        t.Hours,
+                        t.Minutes,
+                        t.Seconds,
+                        t.Milliseconds,
+                        action.Method.Name);
+
+        Console.WriteLine(answer);
+        return result;
+    }
+}
 public sealed partial class MainPage : Page
 {
     private double SampleFrequency = 1024 * 1024 * 10;
@@ -83,17 +113,10 @@ public sealed partial class MainPage : Page
         int samplesPerFrame = samplesPerLine * PALDecoder.PAL_LINES_PER_FRAME;
         uno_palyground.PySDRGuide.IQWavReader.ConfigureRingBuffer(samplesPerFrame * 2);
 
-        var watch = System.Diagnostics.Stopwatch.StartNew();
-        palDecoder.DecodePALSignal(sampleRate: 10000000, fs);
-        watch.Stop();
-        var elapsedMs = watch.ElapsedMilliseconds;
-        TimeSpan t = TimeSpan.FromMilliseconds(elapsedMs);
-        string answer = string.Format("{0:D2}h:{1:D2}m:{2:D2}s:{3:D3}ms",
-                        t.Hours,
-                        t.Minutes,
-                        t.Seconds,
-                        t.Milliseconds);
-        Console.WriteLine($"Decoding finished in {answer}");
+        TimeLapseHelper.PrintTime(() =>
+        {
+            palDecoder.DecodePALSignal(sampleRate: 10000000, fs);
+        });
     }
 
 }
