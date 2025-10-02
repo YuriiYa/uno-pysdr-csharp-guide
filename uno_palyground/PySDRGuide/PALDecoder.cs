@@ -1,6 +1,7 @@
 using ScottPlot;
 using System.Numerics;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using Microsoft.UI.Dispatching;
 using uno_palyground.PySDRGuide;
 
@@ -190,6 +191,20 @@ public class PALDecoder
     private double[]? _vScratch;
     private double[]? _uFiltered;
     private double[]? _vFiltered;
+    // Reversed filter cache for SIMD FIR (stores reversed copies to enable forward vector dot products)
+    private static class FilterReverseCache
+    {
+        private static readonly ConditionalWeakTable<double[], double[]> Reverse = new();
+        public static double[] Get(double[] filter)
+        {
+            if (Reverse.TryGetValue(filter, out var rev)) return rev;
+            var r = (double[])filter.Clone();
+            Array.Reverse(r);
+            Reverse.Add(filter, r);
+            return r;
+        }
+    }
+    private static double[] GetReversedFilter(double[] filter) => FilterReverseCache.Get(filter);
 
     // Profiling accumulators (ticks)
     private long _ticksFieldCopy;
@@ -783,22 +798,22 @@ public class PALDecoder
         int len = videoSignal.Length;
         EnsureBuffer(ref _luminanceBuffer, len);
         EnsureBuffer(ref _chrominanceBuffer, len);
-
+        // We previously performed two independent FIR passes (LPF for luma, BPF for chroma).
+        // To reduce memory bandwidth and halve passes through the large video buffer we
+        // compute both convolutions in a single streaming/vectorized loop.
         double lumaCutoff = Math.Min(_profile.LumaCutoffHz, 0.45 * sampleRate);
         var lumaFilter = CreateLowPassFilter(lumaCutoff, sampleRate);
-        ApplyFilterToDest(videoSignal, lumaFilter, _luminanceBuffer!);
-
         double chromaLow = _profile.ChromaLowHz;
         double chromaHigh = _profile.ChromaHighHz;
         var chromaFilter = CreateBandPassFilter(chromaLow, chromaHigh, sampleRate);
-        ApplyFilterToDest(videoSignal, chromaFilter, _chrominanceBuffer!);
+        ApplyTwoFiltersStaticToDest(videoSignal, lumaFilter, chromaFilter, _luminanceBuffer!, _chrominanceBuffer!);
         return (_luminanceBuffer!, _chrominanceBuffer!);
     }
 
     private (double[] uComponent, double[] vComponent) DecodeChroma(double[] chrominance, int sampleRate, int samplesPerLine, int startLineOffset)
     {
         int len = chrominance.Length;
-        EnsureBuffer(ref _uScratch, len);
+        EnsureBuffer(ref _uScratch, len);   // demod intermediate (can later be removed if we fuse demod+FIR)
         EnsureBuffer(ref _vScratch, len);
         EnsureBuffer(ref _uFiltered, len);
         EnsureBuffer(ref _vFiltered, len);
@@ -807,36 +822,17 @@ public class PALDecoder
         {
             int lineInBuffer = i / samplesPerLine;
             int sampleInLine = i % samplesPerLine;
-            // Absolute line index across the full frame
-            int absoluteLine = startLineOffset + lineInBuffer;
-
-            // PAL V-axis alternates every line; absolute parity must be used across fields
+            int absoluteLine = startLineOffset + lineInBuffer; // cross-field absolute line number
             bool isVInverted = (absoluteLine % 2 != 0);
-
-            // Get the stable, phase-locked reference carrier from the PLL
             var referenceCarrier = pll.GetReference(new Complex(chrominance[i], 0), sampleInLine, isVInverted);
-            // Demodulate using the PLL's reference
-            var demodulatedSample = new Complex(chrominance[i], 0) * Complex.Conjugate(referenceCarrier);
-            // For V, we must respect the PAL switch. We flip the sign back on inverted lines.
-            _uScratch![i] = demodulatedSample.Real;
-            _vScratch![i] = isVInverted ? -demodulatedSample.Imaginary : demodulatedSample.Imaginary;
+            var demod = new Complex(chrominance[i], 0) * Complex.Conjugate(referenceCarrier);
+            _uScratch![i] = demod.Real;
+            _vScratch![i] = isVInverted ? -demod.Imaginary : demod.Imaginary;
         }
-        // Demodulated U & V Components:
-        // |--0Hz----1.3MHz----|
-        // |   Baseband U & V  |
-        // The 1.3 MHz represents the baseband chroma bandwidth in PAL:
-        // - U component bandwidth: ~1.3 MHz
-        // - V component bandwidth: ~1.3 MHz
-
-        // Result after multiplication:
-        // - Desired: Baseband signal (0 - 1.3 MHz) ← What we want
-        // - Unwanted: High frequency components around 8.86 MHz (4.43 + 4.43) ← Noise. To remove this we apply a low-pass filter.
-
-        // Low-pass filter the demodulated components
-        double chromaCutoff = 1.3e6;
+        // Apply the SAME low-pass filter to U & V simultaneously (shared memory reads of filter and partial SIMD dot products)
+        double chromaCutoff = 1.3e6; // PAL chroma baseband width
         var chromaLPF = CreateLowPassFilter(chromaCutoff, sampleRate);
-        ApplyFilterToDest(_uScratch!, chromaLPF, _uFiltered!);
-        ApplyFilterToDest(_vScratch!, chromaLPF, _vFiltered!);
+        ApplySameFilterTwoSignalsStatic(_uScratch!, _vScratch!, chromaLPF, _uFiltered!, _vFiltered!);
         return (_uFiltered!, _vFiltered!);
     }
 
@@ -958,31 +954,185 @@ public class PALDecoder
         return bandPass;
     }
 
-    private static double[] ApplyFilter(double[] signal, double[] filter)
-    {
-        // Retain original for any legacy calls; delegates to pooled helper by allocating a temp dest.
-        double[] dest = new double[signal.Length];
-        ApplyFilterStaticToDest(signal, filter, dest);
-        return dest;
-    }
-
     private static void ApplyFilterStaticToDest(double[] signal, double[] filter, double[] dest)
     {
-        int signalLength = signal.Length;
-        int filterLength = filter.Length;
-        for (int i = 0; i < signalLength; i++)
+        // Vectorized convolution (causal) with reversed filter trick for steady-state region.
+        int n = signal.Length;
+        int taps = filter.Length;
+        if (n == 0) return;
+
+        // Warm-up (edges) where full taps not yet available – scalar
+        int warm = taps - 1;
+        int maxWarm = Math.Min(warm, n - 1);
+        for (int i = 0; i <= maxWarm; i++)
         {
             double sum = 0;
-            int maxTap = Math.Min(filterLength - 1, i);
-            for (int j = 0; j <= maxTap; j++)
+            int maxTap = Math.Min(taps - 1, i);
+            for (int j = 0; j <= maxTap; j++) sum += signal[i - j] * filter[j];
+            dest[i] = sum;
+        }
+
+        if (maxWarm == n - 1) return; // all done (short signal)
+
+        // Prepare reversed filter for steady region so we can do forward dot product over contiguous slice
+    double[] filtRev = GetReversedFilter(filter);
+        int simdWidth = Vector<double>.Count;
+        bool useSimd = Vector.IsHardwareAccelerated && taps >= simdWidth * 2; // require at least two vectors
+
+        for (int i = warm; i < n; i++)
+        {
+            // Full window available: samples [i - taps + 1 .. i]
+            int start = i - taps + 1;
+            double sum;
+            if (useSimd)
             {
-                sum += signal[i - j] * filter[j];
+                sum = 0;
+                int k = 0;
+                int limit = taps - simdWidth;
+                Vector<double> vacc = Vector<double>.Zero;
+                // Slice is contiguous forward segment
+                // We avoid allocating by manual load
+                while (k <= limit)
+                {
+                    var vSig = new Vector<double>(signal, start + k);
+                    var vFlt = new Vector<double>(filtRev, k);
+                    vacc += vSig * vFlt;
+                    k += simdWidth;
+                }
+                sum = 0;
+                for (int s = 0; s < simdWidth; s++) sum += vacc[s];
+                for (; k < taps; k++) sum += signal[start + k] * filtRev[k];
+            }
+            else
+            {
+                sum = 0;
+                for (int k = 0; k < taps; k++) sum += signal[start + k] * filtRev[k];
             }
             dest[i] = sum;
         }
     }
 
-    private static void ApplyFilterToDest(double[] signal, double[] filter, double[] dest) => ApplyFilterStaticToDest(signal, filter, dest);
+    // NEW: Compute two independent FIR outputs (signal * filterA, signal * filterB) in a single pass.
+    // This halves memory traffic vs calling ApplyFilter twice when both outputs are required.
+    private static void ApplyTwoFiltersStaticToDest(double[] signal, double[] filterA, double[] filterB, double[] destA, double[] destB)
+    {
+        int n = signal.Length;
+        int tapsA = filterA.Length;
+        int tapsB = filterB.Length;
+        if (n == 0) return;
+        // For simplicity require equal length; if not equal we fallback to independent calls.
+        if (tapsA != tapsB)
+        {
+            ApplyFilterStaticToDest(signal, filterA, destA);
+            ApplyFilterStaticToDest(signal, filterB, destB);
+            return;
+        }
+        int taps = tapsA;
+        int warm = taps - 1;
+        int maxWarm = Math.Min(warm, n - 1);
+        double[] revA = GetReversedFilter(filterA);
+        double[] revB = ReferenceEquals(filterA, filterB) ? revA : GetReversedFilter(filterB);
+        int simdWidth = Vector<double>.Count;
+        bool useSimd = Vector.IsHardwareAccelerated && taps >= simdWidth * 2;
+
+        // Warm-up edge (scalar)
+        for (int i = 0; i <= maxWarm; i++)
+        {
+            double sumA = 0, sumB = 0; int maxTap = Math.Min(taps - 1, i);
+            for (int k = 0; k <= maxTap; k++)
+            {
+                double s = signal[i - k];
+                sumA += s * filterA[k];
+                sumB += s * filterB[k];
+            }
+            destA[i] = sumA; destB[i] = sumB;
+        }
+        if (maxWarm == n - 1) return;
+        for (int i = warm; i < n; i++)
+        {
+            int start = i - taps + 1;
+            double sumA, sumB;
+            if (useSimd)
+            {
+                int k = 0; int limit = taps - simdWidth; var vaccA = Vector<double>.Zero; var vaccB = Vector<double>.Zero;
+                while (k <= limit)
+                {
+                    var vSig = new Vector<double>(signal, start + k);
+                    var vA = new Vector<double>(revA, k);
+                    var vB = new Vector<double>(revB, k);
+                    vaccA += vSig * vA;
+                    vaccB += vSig * vB;
+                    k += simdWidth;
+                }
+                sumA = 0; sumB = 0;
+                for (int s = 0; s < simdWidth; s++) { sumA += vaccA[s]; sumB += vaccB[s]; }
+                for (; k < taps; k++)
+                {
+                    double sig = signal[start + k];
+                    sumA += sig * revA[k];
+                    sumB += sig * revB[k];
+                }
+            }
+            else
+            {
+                sumA = 0; sumB = 0;
+                for (int k = 0; k < taps; k++)
+                {
+                    double sig = signal[start + k];
+                    sumA += sig * revA[k];
+                    sumB += sig * revB[k];
+                }
+            }
+            destA[i] = sumA; destB[i] = sumB;
+        }
+    }
+
+    // NEW: Apply the same filter to two different source signals simultaneously.
+    private static void ApplySameFilterTwoSignalsStatic(double[] signal1, double[] signal2, double[] filter, double[] dest1, double[] dest2)
+    {
+        int n = signal1.Length;
+        int taps = filter.Length;
+        if (n == 0) return;
+        int warm = taps - 1;
+        int maxWarm = Math.Min(warm, n - 1);
+        double[] rev = GetReversedFilter(filter);
+        int simdWidth = Vector<double>.Count;
+        bool useSimd = Vector.IsHardwareAccelerated && taps >= simdWidth * 2;
+        for (int i = 0; i <= maxWarm; i++)
+        {
+            double sum1 = 0, sum2 = 0; int maxTap = Math.Min(taps - 1, i);
+            for (int k = 0; k <= maxTap; k++)
+            {
+                double s1 = signal1[i - k]; double s2 = signal2[i - k]; double fk = filter[k];
+                sum1 += s1 * fk; sum2 += s2 * fk;
+            }
+            dest1[i] = sum1; dest2[i] = sum2;
+        }
+        if (maxWarm == n - 1) return;
+        for (int i = warm; i < n; i++)
+        {
+            int start = i - taps + 1; double sum1, sum2;
+            if (useSimd)
+            {
+                int k = 0; int limit = taps - simdWidth; var vacc1 = Vector<double>.Zero; var vacc2 = Vector<double>.Zero;
+                while (k <= limit)
+                {
+                    var vS1 = new Vector<double>(signal1, start + k);
+                    var vS2 = new Vector<double>(signal2, start + k);
+                    var vF = new Vector<double>(rev, k);
+                    vacc1 += vS1 * vF; vacc2 += vS2 * vF; k += simdWidth;
+                }
+                sum1 = 0; sum2 = 0; for (int s = 0; s < simdWidth; s++) { sum1 += vacc1[s]; sum2 += vacc2[s]; }
+                for (; k < taps; k++) { double fk = rev[k]; sum1 += signal1[start + k] * fk; sum2 += signal2[start + k] * fk; }
+            }
+            else
+            {
+                sum1 = 0; sum2 = 0;
+                for (int k = 0; k < taps; k++) { double fk = rev[k]; sum1 += signal1[start + k] * fk; sum2 += signal2[start + k] * fk; }
+            }
+            dest1[i] = sum1; dest2[i] = sum2;
+        }
+    }
 
     private static double Clamp(double value, double min, double max)
     {
@@ -1022,38 +1172,61 @@ public class PALDecoder
            _plot.Axes.SetLimitsY(0, height);
            _plot.PlotControl?.Refresh();
 
-           Console.WriteLine($"Decoded PAL frame: {width}x{height} pixels");
+        Console.WriteLine($"Decoded PAL frame: {width}x{height} pixels");
        });
 
     }
 }
-
 
 // This class implements a Phase-Locked Loop (PLL) to recover a stable color subcarrier
 // that is phase-aligned with the incoming signal's color burst.
 public class ColorPll
 {
     private readonly double _sampleRate;
-    private readonly double _lineDuration;
     private readonly double _burstStartTime; // Time after H-sync where burst starts
     private readonly double _burstDuration;  // Duration of the color burst
 
     // PLL state variables
-    private double _phase = 0.0;
     private double _frequency = PALDecoder.PAL_COLOR_CARRIER_FREQ;
     private double _phaseErrorIntegrator = 0.0;
+    private double _phaseIncrement;
+    private Complex _osc = Complex.One; // running oscillator (unit magnitude)
+    private Complex _rot;               // per-sample rotation factor exp(j*phaseIncrement)
+    private int _renormCounter;
 
     // PLL loop filter gains (these may need tuning for noisy signals)
     private const double ProportionalGain = 0.1;
     private const double IntegralGain = 0.005;
 
+    private static readonly Complex PhasePos = Complex.FromPolarCoordinates(1, -Math.PI / 4);   // -45°
+    private static readonly Complex PhaseNeg = Complex.FromPolarCoordinates(1, -3 * Math.PI / 4); // -135°
+
     public ColorPll(int sampleRate)
     {
         _sampleRate = sampleRate;
-        _lineDuration = PALDecoder.PAL_LINE_DURATION;
         // PAL spec: H-sync (4.7µs) + Breezeway (0.6µs) = 5.3µs
         _burstStartTime = 5.3e-6;
         _burstDuration = 2.25e-6;
+        UpdatePhaseIncrement();
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void UpdatePhaseIncrement()
+    {
+        _phaseIncrement = 2 * Math.PI * _frequency / _sampleRate;
+        _rot = Complex.FromPolarCoordinates(1, _phaseIncrement);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void StepOscillator()
+    {
+        _osc *= _rot;
+        // Periodic renormalization to avoid floating drift
+        if ((++_renormCounter & 1023) == 0)
+        {
+            double mag = _osc.Magnitude;
+            _osc /= mag;
+        }
     }
 
     // Generates one sample of the reference carrier and updates the PLL state
@@ -1064,30 +1237,18 @@ public class ColorPll
         // --- Phase Detection (only during the color burst) ---
         if (timeInLine >= _burstStartTime && timeInLine < _burstStartTime + _burstDuration)
         {
-            // The expected phase of the burst depends on the V-axis switch
-            double expectedBurstPhase = isVInverted ? -Math.PI * 3 / 4 : -Math.PI / 4; // -135° or -45° for PAL swing
-            var burstReference = Complex.FromPolarCoordinates(1, _phase + expectedBurstPhase);
-
-            // Calculate phase error: how far off is our PLL from the actual burst?
+            // Reference with expected V-axis phase swing
+            var burstReference = _osc * (isVInverted ? PhaseNeg : PhasePos);
             double phaseError = (chromaSample * Complex.Conjugate(burstReference)).Phase;
 
             // --- Loop Filter ---
             // Update the integrator (I-term)
             _phaseErrorIntegrator += phaseError * IntegralGain;
-
-            // Update the frequency based on the P and I terms
-            _frequency = PALDecoder.PAL_COLOR_CARRIER_FREQ + (phaseError * ProportionalGain) + _phaseErrorIntegrator;
+            // Update frequency
+            _frequency = PALDecoder.PAL_COLOR_CARRIER_FREQ + phaseError * ProportionalGain + _phaseErrorIntegrator;
+            UpdatePhaseIncrement();
         }
-
-        // --- Numerically Controlled Oscillator (NCO) ---
-        // Advance the phase for the next sample using the (potentially updated) frequency
-        _phase += 2 * Math.PI * _frequency / _sampleRate;
-
-        // Wrap phase to keep it within [-PI, PI]
-        if (_phase > Math.PI) _phase -= 2 * Math.PI;
-        if (_phase < -Math.PI) _phase += 2 * Math.PI;
-
-        // Return the final, stable reference carrier for this sample
-        return Complex.FromPolarCoordinates(1, _phase);
+        StepOscillator();
+        return _osc;
     }
 }
