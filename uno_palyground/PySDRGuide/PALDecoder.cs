@@ -182,6 +182,13 @@ public class PALDecoder
     private double[]? _lum1Active, _lum2Active;
     private double[]? _u1Active, _u2Active;
     private double[]? _v1Active, _v2Active;
+    // Filter / color separation reusable buffers
+    private double[]? _luminanceBuffer;
+    private double[]? _chrominanceBuffer;
+    private double[]? _uScratch;
+    private double[]? _vScratch;
+    private double[]? _uFiltered;
+    private double[]? _vFiltered;
 
     private static void EnsureBuffer(ref double[]? buffer, int requiredLength)
     {
@@ -310,8 +317,9 @@ public class PALDecoder
                 if (srcField2OffsetSamples + copySamples <= frameData.Length)
                     Buffer.BlockCopy(frameData, srcField2OffsetSamples * sizeof(double), field2, 0, bytesToCopy);
                 // Process each field
-                var (lum1, chr1) = SeparateLumaChroma(field1, sampleRate, samplesPerLine);
-                var (lum2, chr2) = SeparateLumaChroma(field2, sampleRate, samplesPerLine);
+                // In-place (pooled) luma/chroma separation
+                var (lum1, chr1) = SeparateLumaChromaPooled(field1, sampleRate);
+                var (lum2, chr2) = SeparateLumaChromaPooled(field2, sampleRate);
 
                 // Use absolute line offsets for V-axis alternation (preserves 8-field parity across fields)
                 var (u1, v1) = DecodeChroma(chr1, sampleRate, samplesPerLine, startLineOffset: field1StartLine);
@@ -723,34 +731,35 @@ public class PALDecoder
         return y;
     }
 
-    private (double[] luminance, double[] chrominance) SeparateLumaChroma(double[] videoSignal, int sampleRate, int samplesPerLine)
+    private (double[] luminance, double[] chrominance) SeparateLumaChromaPooled(double[] videoSignal, int sampleRate)
     {
-        // Luma LPF (System profile)
-        double lumaCutoff = Math.Min(_profile.LumaCutoffHz, 0.45 * sampleRate); // safety vs Nyquist
-        var lumaFilter = CreateLowPassFilter(lumaCutoff, sampleRate);
-        double[] luminance = ApplyFilter(videoSignal, lumaFilter);
+        int len = videoSignal.Length;
+        EnsureBuffer(ref _luminanceBuffer, len);
+        EnsureBuffer(ref _chrominanceBuffer, len);
 
-        // Chroma BPF (tighter around 4.4336 MHz to avoid sound at +6.5 MHz in PAL-D/K)
+        double lumaCutoff = Math.Min(_profile.LumaCutoffHz, 0.45 * sampleRate);
+        var lumaFilter = CreateLowPassFilter(lumaCutoff, sampleRate);
+        ApplyFilterToDest(videoSignal, lumaFilter, _luminanceBuffer!);
+
         double chromaLow = _profile.ChromaLowHz;
         double chromaHigh = _profile.ChromaHighHz;
         var chromaFilter = CreateBandPassFilter(chromaLow, chromaHigh, sampleRate);
-        double[] chrominance = ApplyFilter(videoSignal, chromaFilter);
-
-        return (luminance, chrominance);
+        ApplyFilterToDest(videoSignal, chromaFilter, _chrominanceBuffer!);
+        return (_luminanceBuffer!, _chrominanceBuffer!);
     }
 
     private (double[] uComponent, double[] vComponent) DecodeChroma(double[] chrominance, int sampleRate, int samplesPerLine, int startLineOffset)
     {
-        double[] uComponent = new double[chrominance.Length];
-        double[] vComponent = new double[chrominance.Length];
-
+        int len = chrominance.Length;
+        EnsureBuffer(ref _uScratch, len);
+        EnsureBuffer(ref _vScratch, len);
+        EnsureBuffer(ref _uFiltered, len);
+        EnsureBuffer(ref _vFiltered, len);
         var pll = new ColorPll(sampleRate);
-
-        for (int i = 0; i < chrominance.Length; i++)
+        for (int i = 0; i < len; i++)
         {
             int lineInBuffer = i / samplesPerLine;
             int sampleInLine = i % samplesPerLine;
-
             // Absolute line index across the full frame
             int absoluteLine = startLineOffset + lineInBuffer;
 
@@ -761,14 +770,10 @@ public class PALDecoder
             var referenceCarrier = pll.GetReference(new Complex(chrominance[i], 0), sampleInLine, isVInverted);
             // Demodulate using the PLL's reference
             var demodulatedSample = new Complex(chrominance[i], 0) * Complex.Conjugate(referenceCarrier);
-
-            // U demodulation (in-phase with subcarrier)
-            uComponent[i] = demodulatedSample.Real;
-
             // For V, we must respect the PAL switch. We flip the sign back on inverted lines.
-            vComponent[i] = isVInverted ? -demodulatedSample.Imaginary : demodulatedSample.Imaginary;
+            _uScratch![i] = demodulatedSample.Real;
+            _vScratch![i] = isVInverted ? -demodulatedSample.Imaginary : demodulatedSample.Imaginary;
         }
-
         // Demodulated U & V Components:
         // |--0Hz----1.3MHz----|
         // |   Baseband U & V  |
@@ -783,10 +788,9 @@ public class PALDecoder
         // Low-pass filter the demodulated components
         double chromaCutoff = 1.3e6;
         var chromaLPF = CreateLowPassFilter(chromaCutoff, sampleRate);
-        uComponent = ApplyFilter(uComponent, chromaLPF);
-        vComponent = ApplyFilter(vComponent, chromaLPF);
-
-        return (uComponent, vComponent);
+        ApplyFilterToDest(_uScratch!, chromaLPF, _uFiltered!);
+        ApplyFilterToDest(_vScratch!, chromaLPF, _vFiltered!);
+        return (_uFiltered!, _vFiltered!);
     }
 
     // In-place variant: writes into provided destination buffer (height = y.Length / samplesPerLine, width = provided dest width)
@@ -909,26 +913,29 @@ public class PALDecoder
 
     private static double[] ApplyFilter(double[] signal, double[] filter)
     {
+        // Retain original for any legacy calls; delegates to pooled helper by allocating a temp dest.
+        double[] dest = new double[signal.Length];
+        ApplyFilterStaticToDest(signal, filter, dest);
+        return dest;
+    }
+
+    private static void ApplyFilterStaticToDest(double[] signal, double[] filter, double[] dest)
+    {
         int signalLength = signal.Length;
         int filterLength = filter.Length;
-        double[] filtered = new double[signalLength];
-
         for (int i = 0; i < signalLength; i++)
         {
             double sum = 0;
-            for (int j = 0; j < filterLength; j++)
+            int maxTap = Math.Min(filterLength - 1, i);
+            for (int j = 0; j <= maxTap; j++)
             {
-                int index = i - j;
-                if (index >= 0 && index < signalLength)
-                {
-                    sum += signal[index] * filter[j];
-                }
+                sum += signal[i - j] * filter[j];
             }
-            filtered[i] = sum;
+            dest[i] = sum;
         }
-
-        return filtered;
     }
+
+    private static void ApplyFilterToDest(double[] signal, double[] filter, double[] dest) => ApplyFilterStaticToDest(signal, filter, dest);
 
     private static double Clamp(double value, double min, double max)
     {
