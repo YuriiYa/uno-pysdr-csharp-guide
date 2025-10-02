@@ -30,8 +30,7 @@ public static class IQWavReader
         _capacity = capacitySamples;
         _writeIndex = 0;
     }
-    // TODO:  Returns spans into a reusable ring buffer (no Complex[] allocation), or
-    // Writes into a caller-provided Span<Complex> target,
+
     // I can add those too.
     /// <summary>
     /// Reads all interleaved IQ samples (Int16 I,Q pairs) from disk.

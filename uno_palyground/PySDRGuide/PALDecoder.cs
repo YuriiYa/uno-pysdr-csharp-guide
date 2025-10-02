@@ -172,6 +172,29 @@ public class PALDecoder
         _fieldOrder = fieldOrder;
     }
 
+    // Reusable buffers to minimize per-frame allocations
+    private double[]? _field1Buffer;
+    private double[]? _field2Buffer;
+    private byte[,,]? _rgbField1Buffer;
+    private byte[,,]? _rgbField2Buffer;
+    private byte[,,]? _rgbInterleavedFrameBuffer;
+    // Active-area reusable buffers (post-crop) per component per field
+    private double[]? _lum1Active, _lum2Active;
+    private double[]? _u1Active, _u2Active;
+    private double[]? _v1Active, _v2Active;
+
+    private static void EnsureBuffer(ref double[]? buffer, int requiredLength)
+    {
+        if (buffer == null || buffer.Length < requiredLength)
+            buffer = new double[requiredLength];
+    }
+
+    private static void EnsureRgbBuffer(ref byte[,,]? buffer, int height, int width)
+    {
+        if (buffer == null || buffer.GetLength(0) != height || buffer.GetLength(1) != width)
+            buffer = new byte[height, width, 3];
+    }
+
     public void DecodePALSignal(int sampleRate, FileStream fs)
     {
         int samplesPerLine = (int)(PAL_LINE_DURATION * sampleRate); // expected ≈ 64e-6 * fs
@@ -214,9 +237,25 @@ public class PALDecoder
         Console.WriteLine($"Decoding {numberOfFrames} frames (samplesPerLine={samplesPerLine}, samplesPerFrame={samplesPerFrame}).");
 
         double[] frameData = new double[samplesPerFrame];
+        // Precompute active-width parameters (constant across frames for given sampleRate)
+        int preActiveWidth = (int)Math.Round(52e-6 * sampleRate);
+        int preDesiredActiveCol = (int)Math.Round((4.7 + 5.8) * 1e-6 * sampleRate);
+        // replicate original CropToActive copyWidth logic
+        int copyWidth = Math.Max(preActiveWidth, Math.Max(0, samplesPerLine - preDesiredActiveCol));
+        int activeLinesPerField = PAL_VISIBLE_LINES / 2; // 288
+
+        // Ensure active buffers once (size: lines * copyWidth)
+        int activeBufferLenPerField = activeLinesPerField * copyWidth;
+        EnsureBuffer(ref _lum1Active, activeBufferLenPerField);
+        EnsureBuffer(ref _lum2Active, activeBufferLenPerField);
+        EnsureBuffer(ref _u1Active, activeBufferLenPerField);
+        EnsureBuffer(ref _u2Active, activeBufferLenPerField);
+        EnsureBuffer(ref _v1Active, activeBufferLenPerField);
+        EnsureBuffer(ref _v2Active, activeBufferLenPerField);
+
         for (long frameIndex = 0; frameIndex < numberOfFrames; frameIndex++)
         {
-            byte[,,] rgbFrame = null;
+            byte[,,]? rgbFrame = null;
             var stateResult = TimeLapseHelper.PrintTime(() =>
             {
                 Console.WriteLine($"Decoding frame {frameIndex + 1}/{numberOfFrames}...");
@@ -248,8 +287,11 @@ public class PALDecoder
                 //int field1StartLine = VBI_LINES_FIELD1;
                 //int field2StartLine = linesPerFieldAll + VBI_LINES_FIELD2;
 
-                double[] field1 = new double[fieldLines * samplesPerLine];
-                double[] field2 = new double[fieldLines * samplesPerLine];
+                int fieldSamples = fieldLines * samplesPerLine; // contiguous samples per field (visible portion)
+                EnsureBuffer(ref _field1Buffer, fieldSamples);
+                EnsureBuffer(ref _field2Buffer, fieldSamples);
+                var field1 = _field1Buffer!;
+                var field2 = _field2Buffer!;
 
                 int availableLines = frameData.Length / samplesPerLine;
                 if (availableLines < (field2StartLine + fieldLinesVis))
@@ -257,21 +299,16 @@ public class PALDecoder
                     Console.WriteLine($"Frame {frameIndex}: insufficient lines (available={availableLines}) for expected second field start {field2StartLine}. Skipping frame.");
                     return (breakResult: false, continueResult: true);
                 }
-
-                for (int j = 0; j < fieldLinesVis; j++)
-                {
-                    // Field 1: contiguous lines
-                    int src1 = (field1StartLine + j) * samplesPerLine;
-                    int dst1 = j * samplesPerLine;
-                    if (src1 + samplesPerLine > frameData.Length) break; // safety
-                    Array.Copy(frameData, src1, field1, dst1, samplesPerLine);
-
-                    // Field 2: next contiguous block (half-frame later)
-                    int src2 = (field2StartLine + j) * samplesPerLine;
-                    int dst2 = j * samplesPerLine;
-                    if (src2 + samplesPerLine > frameData.Length) break; // safety
-                    Array.Copy(frameData, src2, field2, dst2, samplesPerLine);
-                }
+                // Copy each field as a single contiguous block (eliminates per-line loop & allocations)
+                // Visible lines are already contiguous for each field given strategy A
+                int srcField1OffsetSamples = field1StartLine * samplesPerLine;
+                int srcField2OffsetSamples = field2StartLine * samplesPerLine;
+                int copySamples = fieldLinesVis * samplesPerLine;
+                int bytesToCopy = copySamples * sizeof(double);
+                if (srcField1OffsetSamples + copySamples <= frameData.Length)
+                    Buffer.BlockCopy(frameData, srcField1OffsetSamples * sizeof(double), field1, 0, bytesToCopy);
+                if (srcField2OffsetSamples + copySamples <= frameData.Length)
+                    Buffer.BlockCopy(frameData, srcField2OffsetSamples * sizeof(double), field2, 0, bytesToCopy);
                 // Process each field
                 var (lum1, chr1) = SeparateLumaChroma(field1, sampleRate, samplesPerLine);
                 var (lum2, chr2) = SeparateLumaChroma(field2, sampleRate, samplesPerLine);
@@ -283,20 +320,28 @@ public class PALDecoder
 
                 // OPTIONAL: crop Y/U/V after decode (safe; burst already used)
                 //    var activeWidth = samplesPerLine;
-                (lum1, var activeWidth) = CropToActive(lum1, samplesPerLine, sampleRate);
-                (u1, _) = CropToActive(u1, samplesPerLine, sampleRate);
-                (v1, _) = CropToActive(v1, samplesPerLine, sampleRate);
-
-                (lum2, _) = CropToActive(lum2, samplesPerLine, sampleRate);
-                (u2, _) = CropToActive(u2, samplesPerLine, sampleRate);
-                (v2, _) = CropToActive(v2, samplesPerLine, sampleRate);
+                CropToActiveInto(lum1, samplesPerLine, sampleRate, _lum1Active!, copyWidth);
+                CropToActiveInto(u1, samplesPerLine, sampleRate, _u1Active!, copyWidth);
+                CropToActiveInto(v1, samplesPerLine, sampleRate, _v1Active!, copyWidth);
+                CropToActiveInto(lum2, samplesPerLine, sampleRate, _lum2Active!, copyWidth);
+                CropToActiveInto(u2, samplesPerLine, sampleRate, _u2Active!, copyWidth);
+                CropToActiveInto(v2, samplesPerLine, sampleRate, _v2Active!, copyWidth);
+                int activeWidth = copyWidth;
 
                 // Convert each field (use activeWidth as samplesPerLine)
-                byte[,,] rgbField1 = ConvertYUVToRGB_BT601_Optimized(lum1, u1, v1, activeWidth);
-                byte[,,] rgbField2 = ConvertYUVToRGB_BT601_Optimized(lum2, u2, v2, activeWidth);
+                int fieldHeight = activeLinesPerField; // lum1Active lines
+                EnsureRgbBuffer(ref _rgbField1Buffer, fieldHeight, activeWidth);
+                EnsureRgbBuffer(ref _rgbField2Buffer, fieldHeight, activeWidth);
+                var rgbField1 = _rgbField1Buffer!;
+                var rgbField2 = _rgbField2Buffer!;
+                ConvertYUVToRGB_BT601_OptimizedInto(_lum1Active!, _u1Active!, _v1Active!, activeWidth, rgbField1);
+                ConvertYUVToRGB_BT601_OptimizedInto(_lum2Active!, _u2Active!, _v2Active!, activeWidth, rgbField2);
 
-                // Interleave fields for display
-                rgbFrame = InterleaveFields(rgbField1, rgbField2);
+                // Interleave fields for display into reusable frame buffer
+                int finalHeight = Math.Min(PAL_VISIBLE_LINES, fieldHeight * 2);
+                EnsureRgbBuffer(ref _rgbInterleavedFrameBuffer, finalHeight, activeWidth);
+                InterleaveFieldsInto(rgbField1, rgbField2, _rgbInterleavedFrameBuffer!);
+                rgbFrame = _rgbInterleavedFrameBuffer;
                 return (breakResult: false, continueResult: false);
             });
             if (stateResult.breakResult) break;
@@ -345,7 +390,7 @@ public class PALDecoder
         return true;
     }
 
-    private void SkipSamplesStreaming(FileStream fs, int samplesToSkip)
+    private static void SkipSamplesStreaming(FileStream fs, int samplesToSkip)
     {
         int remaining = samplesToSkip;
         while (remaining > 0)
@@ -357,28 +402,25 @@ public class PALDecoder
         }
     }
 
-    private (double[] data, int width) CropToActive(double[] signal, int samplesPerLine, int sampleRate)
+    // In-place variant: copies cropped active region into provided destination (dest length must be >= lines * copyWidth)
+    private void CropToActiveInto(double[] signal, int samplesPerLine, int sampleRate, double[] dest, int copyWidth)
     {
         int lines = signal.Length / samplesPerLine;
-        int activeWidth = (int)Math.Round(52e-6 * sampleRate);
-        int desiredActiveCol = (int)Math.Round((4.7 + 5.8) * 1e-6 * sampleRate);
-
-        // Bounds safety
-        int copyWidth = Math.Max(activeWidth, Math.Max(0, samplesPerLine - desiredActiveCol));
-        double[] outSig = new double[lines * copyWidth];
-
+        // Original logic calculates desiredActiveCol but then uses: copyWidth = Max(activeWidth, Max(0, samplesPerLine - desiredActiveCol))
+        // We receive copyWidth precomputed; perform straight per-line copy from column 0 for now (mirrors earlier implemented behavior).
         for (int ln = 0; ln < lines; ln++)
         {
             int src = ln * samplesPerLine;
             int dst = ln * copyWidth;
-            Array.Copy(signal, src, outSig, dst, copyWidth);
+            // Safe length guard
+            if (src + copyWidth > signal.Length) break;
+            Buffer.BlockCopy(signal, src * sizeof(double), dest, dst * sizeof(double), copyWidth * sizeof(double));
         }
-        return (outSig, copyWidth);
     }
 
     // auto-find the horizontal start by detecting the H-sync pulse per line and computing the active-video start from timing 
     // (4.7 µs sync + 5.8 µs back porch). 
-    private int EstimateHorizontalOffset(double[] videoSignal, int frameStart, int samplesPerLine, int sampleRate, int linesToUse = 24)
+    private static int EstimateHorizontalOffset(double[] videoSignal, int frameStart, int samplesPerLine, int sampleRate, int linesToUse = 24)
     {
         const double HSYNC_US = 4.7e-6;
         const double BACK_PORCH_US = 5.8e-6;
@@ -500,41 +542,6 @@ public class PALDecoder
             if (v > max) max = v;
         }
         return (min, max);
-    }
-
-    // Interleave two fields into a single frame (PAL interlacing)
-    private byte[,,] InterleaveFields(byte[,,] field1, byte[,,] field2)
-    {
-        int fieldLines = field1.GetLength(0);
-        int width = field1.GetLength(1);
-        int height = Math.Min(PAL_VISIBLE_LINES, fieldLines * 2);
-
-        byte[,,] frame = new byte[height, width, 3];
-
-        int outLine = 0;
-        for (int i = 0; i < fieldLines && outLine < height - 1; i++)
-        {
-            for (int j = 0; j < width; j++)
-            {
-                for (int c = 0; c < 3; c++)
-                {
-                    if (_fieldOrder == FieldOrder.BottomFieldFirst)
-                    {
-                        // BFF: top line from Field 2, next line from Field 1
-                        frame[outLine, j, c] = field2[i, j, c];
-                        frame[outLine + 1, j, c] = field1[i, j, c];
-                    }
-                    else
-                    {
-                        // TFF: top line from Field 1, next line from Field 2
-                        frame[outLine, j, c] = field1[i, j, c];
-                        frame[outLine + 1, j, c] = field2[i, j, c];
-                    }
-                }
-            }
-            outLine += 2;
-        }
-        return frame;
     }
 
     // Works even if sync polarity is flipped by AM magnitude demod.
@@ -716,27 +723,6 @@ public class PALDecoder
         return y;
     }
 
-    private double[] AMDemodulation(Complex[] iqSamples)
-    {
-        // AM demodulation: extract magnitude of complex signal
-        double[] demodulated = new double[iqSamples.Length];
-
-        for (int i = 0; i < iqSamples.Length; i++)
-        {
-            demodulated[i] = iqSamples[i].Magnitude;
-        }
-
-        // Remove DC component
-        double dcOffset = demodulated.Average();
-        for (int i = 0; i < demodulated.Length; i++)
-        {
-            demodulated[i] -= dcOffset;
-        }
-
-        return demodulated;
-    }
-
-
     private (double[] luminance, double[] chrominance) SeparateLumaChroma(double[] videoSignal, int sampleRate, int samplesPerLine)
     {
         // Luma LPF (System profile)
@@ -803,72 +789,13 @@ public class PALDecoder
         return (uComponent, vComponent);
     }
 
-
-    private byte[,,] ConvertYUVToRGB_BT709(double[] y, double[] u, double[] v, int samplesPerLine)
+    // In-place variant: writes into provided destination buffer (height = y.Length / samplesPerLine, width = provided dest width)
+    private void ConvertYUVToRGB_BT601_OptimizedInto(double[] y, double[] u, double[] v, int samplesPerLine, byte[,,] dest)
     {
-        int width = Math.Min(720, samplesPerLine); // Standard PAL width
-        int height = PAL_VISIBLE_LINES;
-
-        byte[,,] rgbFrame = new byte[height, width, 3]; // RGB
-
-        // BT.709 YUV to RGB conversion matrix
-        // [R]   [1.0000   0.0000   1.5748] [Y]
-        // [G] = [1.0000  -0.1873  -0.4681] [U]
-        // [B]   [1.0000   1.8556   0.0000] [V]
-
-        double[,] bt709Matrix = new double[3, 3]
-        {
-        { 1.0000,  0.0000,  1.5748 }, // R coefficients
-        { 1.0000, -0.1873, -0.4681 }, // G coefficients  
-        { 1.0000,  1.8556,  0.0000 }  // B coefficients
-        };
-
-        for (int row = 0; row < height; row++)
-        {
-            for (int col = 0; col < width; col++)
-            {
-                int index = row * samplesPerLine + col;
-
-                if (index < y.Length)
-                {
-                    // Normalize and clamp input values
-                    double yVal = Clamp(y[index], 0, 1);
-                    double uVal = Clamp(u[index], -0.5, 0.5);
-                    double vVal = Clamp(v[index], -0.5, 0.5);
-
-                    // Create YUV vector
-                    double[] yuvVector = { yVal, uVal, vVal };
-
-                    // Matrix multiplication: RGB = Matrix × YUV
-                    double r = bt709Matrix[0, 0] * yuvVector[0] +
-                              bt709Matrix[0, 1] * yuvVector[1] +
-                              bt709Matrix[0, 2] * yuvVector[2];
-
-                    double g = bt709Matrix[1, 0] * yuvVector[0] +
-                              bt709Matrix[1, 1] * yuvVector[1] +
-                              bt709Matrix[1, 2] * yuvVector[2];
-
-                    double b = bt709Matrix[2, 0] * yuvVector[0] +
-                              bt709Matrix[2, 1] * yuvVector[1] +
-                              bt709Matrix[2, 2] * yuvVector[2];
-
-                    // Clamp and convert to byte values
-                    rgbFrame[row, col, 0] = (byte)(Clamp(r, 0, 1) * 255); // R
-                    rgbFrame[row, col, 1] = (byte)(Clamp(g, 0, 1) * 255); // G
-                    rgbFrame[row, col, 2] = (byte)(Clamp(b, 0, 1) * 255); // B
-                }
-            }
-        }
-
-        return rgbFrame;
-    }
-
-    private byte[,,] ConvertYUVToRGB_BT601_Optimized(double[] y, double[] u, double[] v, int samplesPerLine)
-    {
-        int width = Math.Min(720, samplesPerLine);
-        int height = y.Length / samplesPerLine; // derive from buffer length
-
-        byte[,,] rgbFrame = new byte[height, width, 3];
+        int destHeight = dest.GetLength(0);
+        int destWidth = dest.GetLength(1);
+        int height = Math.Min(destHeight, y.Length / samplesPerLine);
+        int width = Math.Min(destWidth, samplesPerLine);
 
         const double c_rv = 1.402;
         const double c_gu = -0.344;
@@ -889,12 +816,48 @@ public class PALDecoder
                 double g = yVal + c_gu * uVal + c_gv * vVal;
                 double b = yVal + c_bu * uVal;
 
-                rgbFrame[row, col, 0] = (byte)(Clamp(r, 0, 1) * 255);
-                rgbFrame[row, col, 1] = (byte)(Clamp(g, 0, 1) * 255);
-                rgbFrame[row, col, 2] = (byte)(Clamp(b, 0, 1) * 255);
+                dest[row, col, 0] = (byte)(Clamp(r, 0, 1) * 255);
+                dest[row, col, 1] = (byte)(Clamp(g, 0, 1) * 255);
+                dest[row, col, 2] = (byte)(Clamp(b, 0, 1) * 255);
             }
         }
-        return rgbFrame;
+    }
+
+    // In-place interleave into destination frame (avoids allocating a new 3D frame array)
+    private void InterleaveFieldsInto(byte[,,] field1, byte[,,] field2, byte[,,] dest)
+    {
+        int fieldLines = field1.GetLength(0);
+        int width = Math.Min(field1.GetLength(1), field2.GetLength(1));
+        int destHeight = dest.GetLength(0);
+        int height = Math.Min(destHeight, fieldLines * 2);
+        int outLine = 0;
+        for (int i = 0; i < fieldLines && outLine < height - 1; i++)
+        {
+            for (int j = 0; j < width; j++)
+            {
+                if (_fieldOrder == FieldOrder.BottomFieldFirst)
+                {
+                    dest[outLine, j, 0] = field2[i, j, 0];
+                    dest[outLine, j, 1] = field2[i, j, 1];
+                    dest[outLine, j, 2] = field2[i, j, 2];
+
+                    dest[outLine + 1, j, 0] = field1[i, j, 0];
+                    dest[outLine + 1, j, 1] = field1[i, j, 1];
+                    dest[outLine + 1, j, 2] = field1[i, j, 2];
+                }
+                else
+                {
+                    dest[outLine, j, 0] = field1[i, j, 0];
+                    dest[outLine, j, 1] = field1[i, j, 1];
+                    dest[outLine, j, 2] = field1[i, j, 2];
+
+                    dest[outLine + 1, j, 0] = field2[i, j, 0];
+                    dest[outLine + 1, j, 1] = field2[i, j, 1];
+                    dest[outLine + 1, j, 2] = field2[i, j, 2];
+                }
+            }
+            outLine += 2;
+        }
     }
 
     private readonly Dictionary<string, double[]> _filterCache = new();
@@ -944,7 +907,7 @@ public class PALDecoder
         return bandPass;
     }
 
-    private double[] ApplyFilter(double[] signal, double[] filter)
+    private static double[] ApplyFilter(double[] signal, double[] filter)
     {
         int signalLength = signal.Length;
         int filterLength = filter.Length;
@@ -967,7 +930,7 @@ public class PALDecoder
         return filtered;
     }
 
-    private double Clamp(double value, double min, double max)
+    private static double Clamp(double value, double min, double max)
     {
         return Math.Max(min, Math.Min(max, value));
     }
@@ -1047,9 +1010,6 @@ public class ColorPll
         // --- Phase Detection (only during the color burst) ---
         if (timeInLine >= _burstStartTime && timeInLine < _burstStartTime + _burstDuration)
         {
-            // Generate the PLL's current estimate of the carrier
-            var pllReference = Complex.FromPolarCoordinates(1, _phase);
-
             // The expected phase of the burst depends on the V-axis switch
             double expectedBurstPhase = isVInverted ? -Math.PI * 3 / 4 : -Math.PI / 4; // -135° or -45° for PAL swing
             var burstReference = Complex.FromPolarCoordinates(1, _phase + expectedBurstPhase);
