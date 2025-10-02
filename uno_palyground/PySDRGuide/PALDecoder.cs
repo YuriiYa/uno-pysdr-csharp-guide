@@ -1,5 +1,6 @@
 using ScottPlot;
 using System.Numerics;
+using System.Diagnostics;
 using Microsoft.UI.Dispatching;
 using uno_palyground.PySDRGuide;
 
@@ -190,6 +191,16 @@ public class PALDecoder
     private double[]? _uFiltered;
     private double[]? _vFiltered;
 
+    // Profiling accumulators (ticks)
+    private long _ticksFieldCopy;
+    private long _ticksLumaChroma;
+    private long _ticksChromaDecode;
+    private long _ticksCrop;
+    private long _ticksRgbConvert;
+    private long _ticksInterleave;
+    private int _profiledFrames;
+    private const bool EnableStageProfiling = true; // toggle to disable detailed stage timing
+
     private static void EnsureBuffer(ref double[]? buffer, int requiredLength)
     {
         if (buffer == null || buffer.Length < requiredLength)
@@ -266,6 +277,7 @@ public class PALDecoder
             var stateResult = TimeLapseHelper.PrintTime(() =>
             {
                 Console.WriteLine($"Decoding frame {frameIndex + 1}/{numberOfFrames}...");
+                long frameFieldCopyTicks=0, frameLumaChromaTicks=0, frameChromaDecodeTicks=0, frameCropTicks=0, frameRgbTicks=0, frameInterleaveTicks=0;
                 if (!ReadAndDemodFrame(fs, samplesPerFrame, frameData))
                 {
                     Console.WriteLine($"Short read at frame {frameIndex}; expected {samplesPerFrame} samples. Stopping.");
@@ -312,28 +324,40 @@ public class PALDecoder
                 int srcField2OffsetSamples = field2StartLine * samplesPerLine;
                 int copySamples = fieldLinesVis * samplesPerLine;
                 int bytesToCopy = copySamples * sizeof(double);
+                long t0 = Stopwatch.GetTimestamp();
                 if (srcField1OffsetSamples + copySamples <= frameData.Length)
                     Buffer.BlockCopy(frameData, srcField1OffsetSamples * sizeof(double), field1, 0, bytesToCopy);
                 if (srcField2OffsetSamples + copySamples <= frameData.Length)
                     Buffer.BlockCopy(frameData, srcField2OffsetSamples * sizeof(double), field2, 0, bytesToCopy);
+                long t1 = Stopwatch.GetTimestamp();
+                frameFieldCopyTicks = t1 - t0;
                 // Process each field
                 // In-place (pooled) luma/chroma separation
+                t0 = Stopwatch.GetTimestamp();
                 var (lum1, chr1) = SeparateLumaChromaPooled(field1, sampleRate);
                 var (lum2, chr2) = SeparateLumaChromaPooled(field2, sampleRate);
+                t1 = Stopwatch.GetTimestamp();
+                frameLumaChromaTicks = t1 - t0;
 
                 // Use absolute line offsets for V-axis alternation (preserves 8-field parity across fields)
+                t0 = Stopwatch.GetTimestamp();
                 var (u1, v1) = DecodeChroma(chr1, sampleRate, samplesPerLine, startLineOffset: field1StartLine);
                 var (u2, v2) = DecodeChroma(chr2, sampleRate, samplesPerLine, startLineOffset: field2StartLine);
+                t1 = Stopwatch.GetTimestamp();
+                frameChromaDecodeTicks = t1 - t0;
 
 
                 // OPTIONAL: crop Y/U/V after decode (safe; burst already used)
                 //    var activeWidth = samplesPerLine;
+                t0 = Stopwatch.GetTimestamp();
                 CropToActiveInto(lum1, samplesPerLine, sampleRate, _lum1Active!, copyWidth);
                 CropToActiveInto(u1, samplesPerLine, sampleRate, _u1Active!, copyWidth);
                 CropToActiveInto(v1, samplesPerLine, sampleRate, _v1Active!, copyWidth);
                 CropToActiveInto(lum2, samplesPerLine, sampleRate, _lum2Active!, copyWidth);
                 CropToActiveInto(u2, samplesPerLine, sampleRate, _u2Active!, copyWidth);
                 CropToActiveInto(v2, samplesPerLine, sampleRate, _v2Active!, copyWidth);
+                t1 = Stopwatch.GetTimestamp();
+                frameCropTicks = t1 - t0;
                 int activeWidth = copyWidth;
 
                 // Convert each field (use activeWidth as samplesPerLine)
@@ -342,14 +366,37 @@ public class PALDecoder
                 EnsureRgbBuffer(ref _rgbField2Buffer, fieldHeight, activeWidth);
                 var rgbField1 = _rgbField1Buffer!;
                 var rgbField2 = _rgbField2Buffer!;
+                t0 = Stopwatch.GetTimestamp();
                 ConvertYUVToRGB_BT601_OptimizedInto(_lum1Active!, _u1Active!, _v1Active!, activeWidth, rgbField1);
                 ConvertYUVToRGB_BT601_OptimizedInto(_lum2Active!, _u2Active!, _v2Active!, activeWidth, rgbField2);
+                t1 = Stopwatch.GetTimestamp();
+                frameRgbTicks = t1 - t0;
 
                 // Interleave fields for display into reusable frame buffer
                 int finalHeight = Math.Min(PAL_VISIBLE_LINES, fieldHeight * 2);
                 EnsureRgbBuffer(ref _rgbInterleavedFrameBuffer, finalHeight, activeWidth);
+                t0 = Stopwatch.GetTimestamp();
                 InterleaveFieldsInto(rgbField1, rgbField2, _rgbInterleavedFrameBuffer!);
+                t1 = Stopwatch.GetTimestamp();
+                frameInterleaveTicks = t1 - t0;
                 rgbFrame = _rgbInterleavedFrameBuffer;
+
+                if (EnableStageProfiling)
+                {
+                    _ticksFieldCopy += frameFieldCopyTicks;
+                    _ticksLumaChroma += frameLumaChromaTicks;
+                    _ticksChromaDecode += frameChromaDecodeTicks;
+                    _ticksCrop += frameCropTicks;
+                    _ticksRgbConvert += frameRgbTicks;
+                    _ticksInterleave += frameInterleaveTicks;
+                    _profiledFrames++;
+                    double ToMs(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
+                    Console.WriteLine($"Stage ms (frame {frameIndex}): copy={ToMs(frameFieldCopyTicks):F3} luma/chroma={ToMs(frameLumaChromaTicks):F3} chromaDecode={ToMs(frameChromaDecodeTicks):F3} crop={ToMs(frameCropTicks):F3} rgb={ToMs(frameRgbTicks):F3} interleave={ToMs(frameInterleaveTicks):F3}");
+                    if (_profiledFrames % 10 == 0)
+                    {
+                        Console.WriteLine($"Averages over {_profiledFrames} frames: copy={ToMs(_ticksFieldCopy/_profiledFrames):F3} luma/chroma={ToMs(_ticksLumaChroma/_profiledFrames):F3} chromaDecode={ToMs(_ticksChromaDecode/_profiledFrames):F3} crop={ToMs(_ticksCrop/_profiledFrames):F3} rgb={ToMs(_ticksRgbConvert/_profiledFrames):F3} interleave={ToMs(_ticksInterleave/_profiledFrames):F3}");
+                    }
+                }
                 return (breakResult: false, continueResult: false);
             });
             if (stateResult.breakResult) break;
