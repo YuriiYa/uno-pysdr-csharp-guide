@@ -167,8 +167,11 @@ public class PALDecoder
     public const double PAL_VIDEO_BANDWIDTH = 5.5e6; // 5.5 MHz
     
     // Tunable FIR tap lengths (performance vs quality)
-    private const int LUMA_LPF_TAPS = 101;          // keep original to preserve sharp luminance response
-    private const int CHROMA_SEPARATION_TAPS = 81;  // slightly shorter band-pass for chroma carrier zone
+    // Use the SAME tap length for luma & chroma separation so we can exploit the single-pass dual filter.
+    // If you observe luma/chroma leakage or softness, raise to 91 or 101; if performance is still insufficient,
+    // you can try lowering to 73. Keeping them equal is key for ApplyTwoFiltersStaticToDest to avoid two passes.
+    private const int LUMA_LPF_TAPS = 81;           // unified length (was 101)
+    private const int CHROMA_SEPARATION_TAPS = 81;  // unified length (was 81 already)
     private const int CHROMA_BASEBAND_LPF_TAPS = 63; // after demod low-pass; can be shorter
 
     public PALDecoder(Plot plot, DispatcherQueue dispatcherQueue, TvSystem system = TvSystem.PAL_DK, FieldOrder fieldOrder = FieldOrder.BottomFieldFirst)
