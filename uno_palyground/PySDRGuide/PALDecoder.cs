@@ -165,6 +165,11 @@ public class PALDecoder
     public const double PAL_LINE_DURATION = 64e-6; // 64 microseconds per line
     public const double PAL_COLOR_CARRIER_FREQ = 4433618.75; // Hz
     public const double PAL_VIDEO_BANDWIDTH = 5.5e6; // 5.5 MHz
+    
+    // Tunable FIR tap lengths (performance vs quality)
+    private const int LUMA_LPF_TAPS = 101;          // keep original to preserve sharp luminance response
+    private const int CHROMA_SEPARATION_TAPS = 81;  // slightly shorter band-pass for chroma carrier zone
+    private const int CHROMA_BASEBAND_LPF_TAPS = 63; // after demod low-pass; can be shorter
 
     public PALDecoder(Plot plot, DispatcherQueue dispatcherQueue, TvSystem system = TvSystem.PAL_DK, FieldOrder fieldOrder = FieldOrder.BottomFieldFirst)
     {
@@ -802,10 +807,10 @@ public class PALDecoder
         // To reduce memory bandwidth and halve passes through the large video buffer we
         // compute both convolutions in a single streaming/vectorized loop.
         double lumaCutoff = Math.Min(_profile.LumaCutoffHz, 0.45 * sampleRate);
-        var lumaFilter = CreateLowPassFilter(lumaCutoff, sampleRate);
+        var lumaFilter = CreateLowPassFilter(lumaCutoff, sampleRate, LUMA_LPF_TAPS);
         double chromaLow = _profile.ChromaLowHz;
         double chromaHigh = _profile.ChromaHighHz;
-        var chromaFilter = CreateBandPassFilter(chromaLow, chromaHigh, sampleRate);
+        var chromaFilter = CreateBandPassFilter(chromaLow, chromaHigh, sampleRate, CHROMA_SEPARATION_TAPS);
         ApplyTwoFiltersStaticToDest(videoSignal, lumaFilter, chromaFilter, _luminanceBuffer!, _chrominanceBuffer!);
         return (_luminanceBuffer!, _chrominanceBuffer!);
     }
@@ -831,7 +836,7 @@ public class PALDecoder
         }
         // Apply the SAME low-pass filter to U & V simultaneously (shared memory reads of filter and partial SIMD dot products)
         double chromaCutoff = 1.3e6; // PAL chroma baseband width
-        var chromaLPF = CreateLowPassFilter(chromaCutoff, sampleRate);
+        var chromaLPF = CreateLowPassFilter(chromaCutoff, sampleRate, CHROMA_BASEBAND_LPF_TAPS);
         ApplySameFilterTwoSignalsStatic(_uScratch!, _vScratch!, chromaLPF, _uFiltered!, _vFiltered!);
         return (_uFiltered!, _vFiltered!);
     }
@@ -909,17 +914,15 @@ public class PALDecoder
 
     private readonly Dictionary<string, double[]> _filterCache = new();
 
-    private double[] CreateLowPassFilter(double cutoffFreq, int sampleRate)
+    private double[] CreateLowPassFilter(double cutoffFreq, int sampleRate, int filterLength = 101)
     {
-        string filterKey = $"LPF_{cutoffFreq}_{sampleRate}";
+        string filterKey = $"LPF_{cutoffFreq}_{sampleRate}_{filterLength}";
         _filterCache.TryGetValue(filterKey, out var cached);
         if (cached != null)
         {
             return cached;
         }
-
-        // Simple FIR low-pass filter
-        int filterLength = 101;
+        // Simple FIR low-pass filter (Hamming window)
         double[] filter = new double[filterLength];
         double fc = cutoffFreq / sampleRate;
 
@@ -939,11 +942,11 @@ public class PALDecoder
         return filter;
     }
 
-    private double[] CreateBandPassFilter(double lowFreq, double highFreq, int sampleRate)
+    private double[] CreateBandPassFilter(double lowFreq, double highFreq, int sampleRate, int filterLength = 101)
     {
         // Create band-pass as difference of two low-pass filters
-        var lpf1 = CreateLowPassFilter(highFreq, sampleRate);
-        var lpf2 = CreateLowPassFilter(lowFreq, sampleRate);
+        var lpf1 = CreateLowPassFilter(highFreq, sampleRate, filterLength);
+        var lpf2 = CreateLowPassFilter(lowFreq, sampleRate, filterLength);
 
         double[] bandPass = new double[lpf1.Length];
         for (int i = 0; i < bandPass.Length; i++)
