@@ -4,6 +4,8 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Microsoft.UI.Dispatching;
 using uno_palyground.PySDRGuide;
+using System.Threading.Tasks;
+using System.Collections.Concurrent;
 
 // PAL D type parameters:
 
@@ -165,7 +167,7 @@ public class PALDecoder
     public const double PAL_LINE_DURATION = 64e-6; // 64 microseconds per line
     public const double PAL_COLOR_CARRIER_FREQ = 4433618.75; // Hz
     public const double PAL_VIDEO_BANDWIDTH = 5.5e6; // 5.5 MHz
-    
+
     // Tunable FIR tap lengths (performance vs quality)
     // Use the SAME tap length for luma & chroma separation so we can exploit the single-pass dual filter.
     // If you observe luma/chroma leakage or softness, raise to 91 or 101; if performance is still insufficient,
@@ -199,17 +201,33 @@ public class PALDecoder
     private double[]? _vScratch;
     private double[]? _uFiltered;
     private double[]? _vFiltered;
+    // Per-field parallel buffers (avoid contention when processing the two fields concurrently)
+    private double[]? _luminanceBufferF1;
+    private double[]? _chrominanceBufferF1;
+    private double[]? _luminanceBufferF2;
+    private double[]? _chrominanceBufferF2;
+    private double[]? _uScratchF1;
+    private double[]? _vScratchF1;
+    private double[]? _uFilteredF1;
+    private double[]? _vFilteredF1;
+    private double[]? _uScratchF2;
+    private double[]? _vScratchF2;
+    private double[]? _uFilteredF2;
+    private double[]? _vFilteredF2;
     // Reversed filter cache for SIMD FIR (stores reversed copies to enable forward vector dot products)
     private static class FilterReverseCache
     {
+        // ConditionalWeakTable is thread-safe but Add can race if we do a TryGet+Add pattern.
+        // Use GetValue factory which is atomic per key.
         private static readonly ConditionalWeakTable<double[], double[]> Reverse = new();
         public static double[] Get(double[] filter)
         {
-            if (Reverse.TryGetValue(filter, out var rev)) return rev;
-            var r = (double[])filter.Clone();
-            Array.Reverse(r);
-            Reverse.Add(filter, r);
-            return r;
+            return Reverse.GetValue(filter, static f =>
+            {
+                var r = (double[])f.Clone();
+                Array.Reverse(r);
+                return r;
+            });
         }
     }
     private static double[] GetReversedFilter(double[] filter) => FilterReverseCache.Get(filter);
@@ -300,7 +318,7 @@ public class PALDecoder
             var stateResult = TimeLapseHelper.PrintTime(() =>
             {
                 Console.WriteLine($"Decoding frame {frameIndex + 1}/{numberOfFrames}...");
-                long frameFieldCopyTicks=0, frameLumaChromaTicks=0, frameChromaDecodeTicks=0, frameCropTicks=0, frameRgbTicks=0, frameInterleaveTicks=0;
+                long frameFieldCopyTicks = 0, frameLumaChromaTicks = 0, frameChromaDecodeTicks = 0, frameCropTicks = 0, frameRgbTicks = 0, frameInterleaveTicks = 0;
                 if (!ReadAndDemodFrame(fs, samplesPerFrame, frameData))
                 {
                     Console.WriteLine($"Short read at frame {frameIndex}; expected {samplesPerFrame} samples. Stopping.");
@@ -354,31 +372,101 @@ public class PALDecoder
                     Buffer.BlockCopy(frameData, srcField2OffsetSamples * sizeof(double), field2, 0, bytesToCopy);
                 long t1 = Stopwatch.GetTimestamp();
                 frameFieldCopyTicks = t1 - t0;
-                // Process each field
-                // In-place (pooled) luma/chroma separation
-                t0 = Stopwatch.GetTimestamp();
-                var (lum1, chr1) = SeparateLumaChromaPooled(field1, sampleRate);
-                var (lum2, chr2) = SeparateLumaChromaPooled(field2, sampleRate);
-                t1 = Stopwatch.GetTimestamp();
-                frameLumaChromaTicks = t1 - t0;
+                // Pre-warm filters once (outside parallel region) to avoid dictionary races
+                double lumaCutoff = Math.Min(_profile.LumaCutoffHz, 0.45 * sampleRate);
+                var lumaFilter = CreateLowPassFilter(lumaCutoff, sampleRate, LUMA_LPF_TAPS);
+                double chromaLow = _profile.ChromaLowHz;
+                double chromaHigh = _profile.ChromaHighHz;
+                var chromaFilter = CreateBandPassFilter(chromaLow, chromaHigh, sampleRate, CHROMA_SEPARATION_TAPS);
+                var chromaLPF = CreateLowPassFilter(1.3e6, sampleRate, CHROMA_BASEBAND_LPF_TAPS);
 
-                // Use absolute line offsets for V-axis alternation (preserves 8-field parity across fields)
+                // Process each field in parallel: luma/chroma separation + chroma decode
+                double[]? lum1 = null, chr1 = null, u1 = null, v1 = null;
+                double[]? lum2 = null, chr2 = null, u2 = null, v2 = null;
+
                 t0 = Stopwatch.GetTimestamp();
-                var (u1, v1) = DecodeChroma(chr1, sampleRate, samplesPerLine, startLineOffset: field1StartLine);
-                var (u2, v2) = DecodeChroma(chr2, sampleRate, samplesPerLine, startLineOffset: field2StartLine);
+                Parallel.Invoke(
+                    () =>
+                    {
+                        // Field 1 luma/chroma
+                        int len1 = field1.Length;
+                        EnsureBuffer(ref _luminanceBufferF1, len1);
+                        EnsureBuffer(ref _chrominanceBufferF1, len1);
+                        ApplyTwoFiltersStaticToDest(field1, lumaFilter, chromaFilter, _luminanceBufferF1!, _chrominanceBufferF1!);
+                        lum1 = _luminanceBufferF1!; chr1 = _chrominanceBufferF1!;
+                        // Chroma decode field 1 (reuse per-field buffers)
+                        EnsureBuffer(ref _uScratchF1, len1);
+                        EnsureBuffer(ref _vScratchF1, len1);
+                        EnsureBuffer(ref _uFilteredF1, len1);
+                        EnsureBuffer(ref _vFilteredF1, len1);
+                        var pll1 = new ColorPll(sampleRate);
+                        for (int iSample = 0; iSample < len1; iSample++)
+                        {
+                            int lineInBuffer = iSample / samplesPerLine;
+                            int sampleInLine = iSample % samplesPerLine;
+                            int absoluteLine = field1StartLine + lineInBuffer;
+                            bool isVInverted = (absoluteLine % 2 != 0);
+                            var refCarrier = pll1.GetReference(new Complex(chr1[iSample], 0), sampleInLine, isVInverted);
+                            var demod = new Complex(chr1[iSample], 0) * Complex.Conjugate(refCarrier);
+                            _uScratchF1![iSample] = demod.Real;
+                            _vScratchF1![iSample] = isVInverted ? -demod.Imaginary : demod.Imaginary;
+                        }
+                        ApplySameFilterTwoSignalsStatic(_uScratchF1!, _vScratchF1!, chromaLPF, _uFilteredF1!, _vFilteredF1!);
+                        u1 = _uFilteredF1!; v1 = _vFilteredF1!;
+                    },
+                    () =>
+                    {
+                        // Field 2 luma/chroma
+                        int len2 = field2.Length;
+                        EnsureBuffer(ref _luminanceBufferF2, len2);
+                        EnsureBuffer(ref _chrominanceBufferF2, len2);
+                        ApplyTwoFiltersStaticToDest(field2, lumaFilter, chromaFilter, _luminanceBufferF2!, _chrominanceBufferF2!);
+                        lum2 = _luminanceBufferF2!; chr2 = _chrominanceBufferF2!;
+                        // Chroma decode field 2
+                        EnsureBuffer(ref _uScratchF2, len2);
+                        EnsureBuffer(ref _vScratchF2, len2);
+                        EnsureBuffer(ref _uFilteredF2, len2);
+                        EnsureBuffer(ref _vFilteredF2, len2);
+                        var pll2 = new ColorPll(sampleRate);
+                        for (int iSample = 0; iSample < len2; iSample++)
+                        {
+                            int lineInBuffer = iSample / samplesPerLine;
+                            int sampleInLine = iSample % samplesPerLine;
+                            int absoluteLine = field2StartLine + lineInBuffer;
+                            bool isVInverted = (absoluteLine % 2 != 0);
+                            var refCarrier = pll2.GetReference(new Complex(chr2[iSample], 0), sampleInLine, isVInverted);
+                            var demod = new Complex(chr2[iSample], 0) * Complex.Conjugate(refCarrier);
+                            _uScratchF2![iSample] = demod.Real;
+                            _vScratchF2![iSample] = isVInverted ? -demod.Imaginary : demod.Imaginary;
+                        }
+                        ApplySameFilterTwoSignalsStatic(_uScratchF2!, _vScratchF2!, chromaLPF, _uFilteredF2!, _vFilteredF2!);
+                        u2 = _uFilteredF2!; v2 = _vFilteredF2!;
+                    }
+                );
                 t1 = Stopwatch.GetTimestamp();
-                frameChromaDecodeTicks = t1 - t0;
+                // The combined time includes both luma/chroma and chroma decode for both fields due to parallel execution.
+                // Attribute proportionally: keep prior profiling buckets (split roughly by previous ratio) to retain stage visibility.
+                long combined = t1 - t0;
+                // Estimate split using previous frame's proportion if available; fallback 60/40 (sep/decode)
+                double prevSep = _ticksLumaChroma > 0 && _ticksChromaDecode > 0 ? _ticksLumaChroma : 6;
+                double prevChroma = _ticksChromaDecode > 0 ? _ticksChromaDecode : 4;
+                double totalPrev = prevSep + prevChroma;
+                frameLumaChromaTicks = (long)(combined * (prevSep / totalPrev));
+                frameChromaDecodeTicks = combined - frameLumaChromaTicks;
+
+                // Assign refs for downstream steps
+                var lum1Ref = lum1!; var lum2Ref = lum2!; var u1Ref = u1!; var v1Ref = v1!; var u2Ref = u2!; var v2Ref = v2!;
 
 
                 // OPTIONAL: crop Y/U/V after decode (safe; burst already used)
                 //    var activeWidth = samplesPerLine;
                 t0 = Stopwatch.GetTimestamp();
-                CropToActiveInto(lum1, samplesPerLine, sampleRate, _lum1Active!, copyWidth);
-                CropToActiveInto(u1, samplesPerLine, sampleRate, _u1Active!, copyWidth);
-                CropToActiveInto(v1, samplesPerLine, sampleRate, _v1Active!, copyWidth);
-                CropToActiveInto(lum2, samplesPerLine, sampleRate, _lum2Active!, copyWidth);
-                CropToActiveInto(u2, samplesPerLine, sampleRate, _u2Active!, copyWidth);
-                CropToActiveInto(v2, samplesPerLine, sampleRate, _v2Active!, copyWidth);
+                CropToActiveInto(lum1Ref, samplesPerLine, sampleRate, _lum1Active!, copyWidth);
+                CropToActiveInto(u1Ref, samplesPerLine, sampleRate, _u1Active!, copyWidth);
+                CropToActiveInto(v1Ref, samplesPerLine, sampleRate, _v1Active!, copyWidth);
+                CropToActiveInto(lum2Ref, samplesPerLine, sampleRate, _lum2Active!, copyWidth);
+                CropToActiveInto(u2Ref, samplesPerLine, sampleRate, _u2Active!, copyWidth);
+                CropToActiveInto(v2Ref, samplesPerLine, sampleRate, _v2Active!, copyWidth);
                 t1 = Stopwatch.GetTimestamp();
                 frameCropTicks = t1 - t0;
                 int activeWidth = copyWidth;
@@ -417,7 +505,7 @@ public class PALDecoder
                     Console.WriteLine($"Stage ms (frame {frameIndex}): copy={ToMs(frameFieldCopyTicks):F3} luma/chroma={ToMs(frameLumaChromaTicks):F3} chromaDecode={ToMs(frameChromaDecodeTicks):F3} crop={ToMs(frameCropTicks):F3} rgb={ToMs(frameRgbTicks):F3} interleave={ToMs(frameInterleaveTicks):F3}");
                     if (_profiledFrames % 10 == 0)
                     {
-                        Console.WriteLine($"Averages over {_profiledFrames} frames: copy={ToMs(_ticksFieldCopy/_profiledFrames):F3} luma/chroma={ToMs(_ticksLumaChroma/_profiledFrames):F3} chromaDecode={ToMs(_ticksChromaDecode/_profiledFrames):F3} crop={ToMs(_ticksCrop/_profiledFrames):F3} rgb={ToMs(_ticksRgbConvert/_profiledFrames):F3} interleave={ToMs(_ticksInterleave/_profiledFrames):F3}");
+                        Console.WriteLine($"Averages over {_profiledFrames} frames: copy={ToMs(_ticksFieldCopy / _profiledFrames):F3} luma/chroma={ToMs(_ticksLumaChroma / _profiledFrames):F3} chromaDecode={ToMs(_ticksChromaDecode / _profiledFrames):F3} crop={ToMs(_ticksCrop / _profiledFrames):F3} rgb={ToMs(_ticksRgbConvert / _profiledFrames):F3} interleave={ToMs(_ticksInterleave / _profiledFrames):F3}");
                     }
                 }
                 return (breakResult: false, continueResult: false);
@@ -915,49 +1003,43 @@ public class PALDecoder
         }
     }
 
-    private readonly Dictionary<string, double[]> _filterCache = new();
+    // Thread-safe shared filter cache (keyed by cutoff/sampleRate/tap count)
+    private readonly ConcurrentDictionary<string, double[]> _filterCache = new();
 
     private double[] CreateLowPassFilter(double cutoffFreq, int sampleRate, int filterLength = 101)
     {
         string filterKey = $"LPF_{cutoffFreq}_{sampleRate}_{filterLength}";
-        _filterCache.TryGetValue(filterKey, out var cached);
-        if (cached != null)
+        return _filterCache.GetOrAdd(filterKey, static key =>
         {
-            return cached;
-        }
-        // Simple FIR low-pass filter (Hamming window)
-        double[] filter = new double[filterLength];
-        double fc = cutoffFreq / sampleRate;
-
-        for (int i = 0; i < filterLength; i++)
-        {
-            int n = i - filterLength / 2;
-            if (n == 0)
-                filter[i] = 2 * fc;
-            else
-                filter[i] = Math.Sin(2 * Math.PI * fc * n) / (Math.PI * n);
-
-            // Apply Hamming window
-            filter[i] *= 0.54 - 0.46 * Math.Cos(2 * Math.PI * i / (filterLength - 1));
-        }
-
-        _filterCache.Add(filterKey, filter);
-        return filter;
+            // key format: LPF_{cutoff}_{sampleRate}_{length}
+            var parts = key.Split('_');
+            double cutoff = double.Parse(parts[1], System.Globalization.CultureInfo.InvariantCulture);
+            int sr = int.Parse(parts[2], System.Globalization.CultureInfo.InvariantCulture);
+            int fl = int.Parse(parts[3], System.Globalization.CultureInfo.InvariantCulture);
+            double[] filter = new double[fl];
+            double fc = cutoff / sr;
+            for (int i = 0; i < fl; i++)
+            {
+                int n = i - fl / 2;
+                double v = (n == 0) ? 2 * fc : Math.Sin(2 * Math.PI * fc * n) / (Math.PI * n);
+                v *= 0.54 - 0.46 * Math.Cos(2 * Math.PI * i / (fl - 1)); // Hamming window
+                filter[i] = v;
+            }
+            return filter;
+        });
     }
 
     private double[] CreateBandPassFilter(double lowFreq, double highFreq, int sampleRate, int filterLength = 101)
     {
-        // Create band-pass as difference of two low-pass filters
-        var lpf1 = CreateLowPassFilter(highFreq, sampleRate, filterLength);
-        var lpf2 = CreateLowPassFilter(lowFreq, sampleRate, filterLength);
-
-        double[] bandPass = new double[lpf1.Length];
-        for (int i = 0; i < bandPass.Length; i++)
+        string key = $"BPF_{lowFreq}_{highFreq}_{sampleRate}_{filterLength}";
+        return _filterCache.GetOrAdd(key, _ =>
         {
-            bandPass[i] = lpf1[i] - lpf2[i];
-        }
-
-        return bandPass;
+            var lpf1 = CreateLowPassFilter(highFreq, sampleRate, filterLength);
+            var lpf2 = CreateLowPassFilter(lowFreq, sampleRate, filterLength);
+            double[] bandPass = new double[lpf1.Length];
+            for (int i = 0; i < bandPass.Length; i++) bandPass[i] = lpf1[i] - lpf2[i];
+            return bandPass;
+        });
     }
 
     private static void ApplyFilterStaticToDest(double[] signal, double[] filter, double[] dest)
@@ -981,7 +1063,7 @@ public class PALDecoder
         if (maxWarm == n - 1) return; // all done (short signal)
 
         // Prepare reversed filter for steady region so we can do forward dot product over contiguous slice
-    double[] filtRev = GetReversedFilter(filter);
+        double[] filtRev = GetReversedFilter(filter);
         int simdWidth = Vector<double>.Count;
         bool useSimd = Vector.IsHardwareAccelerated && taps >= simdWidth * 2; // require at least two vectors
 
@@ -1178,7 +1260,7 @@ public class PALDecoder
            _plot.Axes.SetLimitsY(0, height);
            _plot.PlotControl?.Refresh();
 
-        Console.WriteLine($"Decoded PAL frame: {width}x{height} pixels");
+           Console.WriteLine($"Decoded PAL frame: {width}x{height} pixels");
        });
 
     }
