@@ -394,24 +394,13 @@ public class PALDecoder
                         EnsureBuffer(ref _chrominanceBufferF1, len1);
                         ApplyTwoFiltersStaticToDest(field1, lumaFilter, chromaFilter, _luminanceBufferF1!, _chrominanceBufferF1!);
                         lum1 = _luminanceBufferF1!; chr1 = _chrominanceBufferF1!;
-                        // Chroma decode field 1 (reuse per-field buffers)
+                        // Fused chroma demod+LPF field 1
                         EnsureBuffer(ref _uScratchF1, len1);
                         EnsureBuffer(ref _vScratchF1, len1);
                         EnsureBuffer(ref _uFilteredF1, len1);
                         EnsureBuffer(ref _vFilteredF1, len1);
-                        var pll1 = new ColorPll(sampleRate);
-                        for (int iSample = 0; iSample < len1; iSample++)
-                        {
-                            int lineInBuffer = iSample / samplesPerLine;
-                            int sampleInLine = iSample % samplesPerLine;
-                            int absoluteLine = field1StartLine + lineInBuffer;
-                            bool isVInverted = (absoluteLine % 2 != 0);
-                            var refCarrier = pll1.GetReference(new Complex(chr1[iSample], 0), sampleInLine, isVInverted);
-                            var demod = new Complex(chr1[iSample], 0) * Complex.Conjugate(refCarrier);
-                            _uScratchF1![iSample] = demod.Real;
-                            _vScratchF1![iSample] = isVInverted ? -demod.Imaginary : demod.Imaginary;
-                        }
-                        ApplySameFilterTwoSignalsStatic(_uScratchF1!, _vScratchF1!, chromaLPF, _uFilteredF1!, _vFilteredF1!);
+                        var revLPF = GetReversedFilter(chromaLPF);
+                        FusedChromaDemodAndFilter(chr1!, sampleRate, samplesPerLine, field1StartLine, chromaLPF, revLPF, _uScratchF1!, _vScratchF1!, _uFilteredF1!, _vFilteredF1!);
                         u1 = _uFilteredF1!; v1 = _vFilteredF1!;
                     },
                     () =>
@@ -422,24 +411,13 @@ public class PALDecoder
                         EnsureBuffer(ref _chrominanceBufferF2, len2);
                         ApplyTwoFiltersStaticToDest(field2, lumaFilter, chromaFilter, _luminanceBufferF2!, _chrominanceBufferF2!);
                         lum2 = _luminanceBufferF2!; chr2 = _chrominanceBufferF2!;
-                        // Chroma decode field 2
+                        // Fused chroma demod+LPF field 2
                         EnsureBuffer(ref _uScratchF2, len2);
                         EnsureBuffer(ref _vScratchF2, len2);
                         EnsureBuffer(ref _uFilteredF2, len2);
                         EnsureBuffer(ref _vFilteredF2, len2);
-                        var pll2 = new ColorPll(sampleRate);
-                        for (int iSample = 0; iSample < len2; iSample++)
-                        {
-                            int lineInBuffer = iSample / samplesPerLine;
-                            int sampleInLine = iSample % samplesPerLine;
-                            int absoluteLine = field2StartLine + lineInBuffer;
-                            bool isVInverted = (absoluteLine % 2 != 0);
-                            var refCarrier = pll2.GetReference(new Complex(chr2[iSample], 0), sampleInLine, isVInverted);
-                            var demod = new Complex(chr2[iSample], 0) * Complex.Conjugate(refCarrier);
-                            _uScratchF2![iSample] = demod.Real;
-                            _vScratchF2![iSample] = isVInverted ? -demod.Imaginary : demod.Imaginary;
-                        }
-                        ApplySameFilterTwoSignalsStatic(_uScratchF2!, _vScratchF2!, chromaLPF, _uFilteredF2!, _vFilteredF2!);
+                        var revLPF2 = GetReversedFilter(chromaLPF);
+                        FusedChromaDemodAndFilter(chr2!, sampleRate, samplesPerLine, field2StartLine, chromaLPF, revLPF2, _uScratchF2!, _vScratchF2!, _uFilteredF2!, _vFilteredF2!);
                         u2 = _uFilteredF2!; v2 = _vFilteredF2!;
                     }
                 );
@@ -1040,6 +1018,59 @@ public class PALDecoder
             for (int i = 0; i < bandPass.Length; i++) bandPass[i] = lpf1[i] - lpf2[i];
             return bandPass;
         });
+    }
+
+    // Fused chroma demod + low-pass filtering (single pass per field)
+    private void FusedChromaDemodAndFilter(double[] chroma, int sampleRate, int samplesPerLine, int startLineOffset,
+        double[] lpf, double[] lpfRev, double[] uScratch, double[] vScratch, double[] uOut, double[] vOut)
+    {
+        int len = chroma.Length;
+        int taps = lpf.Length;
+        int warm = taps - 1;
+        int maxWarm = Math.Min(warm, len - 1);
+        var pll = new ColorPll(sampleRate);
+        int simdWidth = Vector<double>.Count;
+        bool useSimd = Vector.IsHardwareAccelerated && taps >= simdWidth * 2;
+        for (int i = 0; i < len; i++)
+        {
+            int lineInBuffer = i / samplesPerLine;
+            int sampleInLine = i % samplesPerLine;
+            int absLine = startLineOffset + lineInBuffer;
+            bool invertV = (absLine % 2 != 0);
+            double c = chroma[i];
+            var refCarrier = pll.GetReference(new Complex(c, 0), sampleInLine, invertV);
+            var demod = new Complex(c, 0) * Complex.Conjugate(refCarrier);
+            double u = demod.Real; double v = invertV ? -demod.Imaginary : demod.Imaginary;
+            uScratch[i] = u; vScratch[i] = v;
+            double sumU = 0, sumV = 0;
+            if (i <= maxWarm)
+            {
+                int maxTap = Math.Min(taps - 1, i);
+                for (int k = 0; k <= maxTap; k++) { double fk = lpf[k]; sumU += uScratch[i - k] * fk; sumV += vScratch[i - k] * fk; }
+            }
+            else
+            {
+                int start = i - taps + 1;
+                if (useSimd)
+                {
+                    int k = 0; int limit = taps - simdWidth; var vaccU = Vector<double>.Zero; var vaccV = Vector<double>.Zero;
+                    while (k <= limit)
+                    {
+                        var vUS = new Vector<double>(uScratch, start + k);
+                        var vVS = new Vector<double>(vScratch, start + k);
+                        var vF = new Vector<double>(lpfRev, k);
+                        vaccU += vUS * vF; vaccV += vVS * vF; k += simdWidth;
+                    }
+                    for (int s = 0; s < simdWidth; s++) { sumU += vaccU[s]; sumV += vaccV[s]; }
+                    for (; k < taps; k++) { double fk = lpfRev[k]; sumU += uScratch[start + k] * fk; sumV += vScratch[start + k] * fk; }
+                }
+                else
+                {
+                    for (int k = 0; k < taps; k++) { double fk = lpfRev[k]; sumU += uScratch[start + k] * fk; sumV += vScratch[start + k] * fk; }
+                }
+            }
+            uOut[i] = sumU; vOut[i] = sumV;
+        }
     }
 
     private static void ApplyFilterStaticToDest(double[] signal, double[] filter, double[] dest)
