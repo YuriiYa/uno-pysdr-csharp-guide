@@ -7,6 +7,45 @@ using uno_palyground.PySDRGuide;
 using System.Threading.Tasks;
 using System.Collections.Concurrent;
 
+// ## Abbreviations:
+// ADC: Analog-to-Digital Converter – digitizes incoming analog IF/baseband samples.
+// DAC: Digital-to-Analog Converter – converts processed digital samples back to analog (for TX).
+// DX: Long-Distance Reception/Communication – receiving signals from far-away stations (often weak).
+// LNA: Low-Noise Amplifier – first RF stage, boosts weak signals with minimal added noise.  LNA: 0–40 dB in 8 dB steps.
+// VGA: Variable Gain Amplifier – later (IF/baseband) gain stage for amplitude leveling. VGA: 0–62 dB in 2 dB steps
+// AGC: Automatic Gain Control – dynamic adjustment loop managing overall receiver gain.
+// RF: Radio Frequency – original high-frequency spectrum before downconversion.
+// IF: Intermediate Frequency – shifted frequency after first mixing stage; easier to filter.
+// LO: Local Oscillator – generates mixing frequency for up/down conversion.
+// PLL: Phase-Locked Loop – locks oscillator phase/frequency to a reference (e.g., color burst, carrier).
+// SNR: Signal-to-Noise Ratio – signal power relative to noise floor.
+// NF: Noise Figure – measure of noise degradation added by a receiver chain.
+// IMD: Intermodulation Distortion – spurious products from nonlinear mixing of strong signals.
+// IP3: Third-Order Intercept Point – metric of linearity; higher implies better strong-signal handling.
+// MDS: Minimum Discernible Signal – weakest signal detectable above noise.
+// BW: Bandwidth – frequency span of interest or filter passband width.
+// IQ: In-phase / Quadrature – orthogonal baseband components representing complex signals.
+// DSP: Digital Signal Processing – algorithmic manipulation of sampled data.
+// FIR: Finite Impulse Response (filter) – convolution-based filter with finite coefficients.
+// FFT: Fast Fourier Transform – efficient computation of discrete spectrum.
+// LO Leakage: Residual LO feedthrough at baseband (DC spur).
+// DC Offset: Unwanted constant bias in I/Q channels (often corrected).
+// AGC Loop: Control mechanism adjusting LNA/VGA for target amplitude.
+// AFE: Analog Front End – collective RF input circuitry (filters, LNA, mixers).
+// BB: Baseband – zero-IF representation after full downconversion.
+// FOM: Figure of Merit – generalized performance composite metric (context-dependent).
+// FEC: Forward Error Correction – coding to recover from bit errors (more for digital comms).
+// BER: Bit Error Rate – fraction of received bits in error.
+// QAM: Quadrature Amplitude Modulation – constellation using amplitude + phase states.
+// AM: Amplitude Modulation – information encoded in amplitude variations.
+// FM: Frequency Modulation – information encoded in instantaneous frequency shifts.
+// SSB: Single Sideband – modulation using one spectral sideband.
+// CW: Continuous Wave – unmodulated carrier (e.g., Morse transmissions).
+// VCO: Voltage-Controlled Oscillator – tunable oscillator often inside PLL.
+// PA: Power Amplifier – final high-power stage for transmission.
+// DNR: Dynamic Noise Reduction (contextual DSP technique).
+// TDD: Time Division Duplex – alternating TX/RX time slots (less Pluto-specific but SDR-relevant).
+
 // PAL D type parameters:
 
 // Video bandwidth: ~6.0 MHz (System D/K)

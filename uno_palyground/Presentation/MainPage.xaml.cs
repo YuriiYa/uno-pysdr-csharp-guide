@@ -10,11 +10,11 @@ public static class TimeLapseHelper
 {
     public static void PrintTime(Action action)
     {
-       _ = PrintTime(() =>
-        {
-            action();
+        _ = PrintTime(() =>
+         {
+             action();
              return (false, false);
-        }); 
+         });
     }
 
     public static (bool breakResult, bool continueResult) PrintTime(Func<(bool breakResult, bool continueResult)> action)
@@ -38,10 +38,6 @@ public static class TimeLapseHelper
 }
 public sealed partial class MainPage : Page
 {
-    private double SampleFrequency = 1024 * 1024 * 10;
-    private int FFTSize = 1024 * 1024 * 8; // FFT size (number of complex samples)
-    private int CenterFrequency = 99000000;    // 105.5 MHz
-    HackRFInteraction _hackrfInteraction;
     public MainPage()
     {
         this.InitializeComponent();
@@ -61,9 +57,6 @@ public sealed partial class MainPage : Page
          d.QPSK();
          WinUIPlot1.Refresh();
  */
-        /*var d = new HackRF.Namespace.HackRF(WinUIPlot1.Plot, DispatcherQueue, WinUIPlotModulation.Plot);
-        d.GetAndVisualizeHackRFData(new HackRFInteraction());
-        WinUIPlot1.Refresh();*/
         //var noise = new Noise(WinUIPlot1.Plot, WinUIPlotModulation.Plot);
         // noise.GaussianNoise();
         //noise.ComplexNoise();
@@ -71,7 +64,32 @@ public sealed partial class MainPage : Page
         /*var videoFileExample = new VideoFromFile(WinUIPlot1.Plot, WinUIPlotModulation.Plot);
         videoFileExample.DoShowVideoFile();*/
 
-        DecodePALVideoAsync(WinUIPlot1.Plot);
+        // DecodePALVideoAsync(WinUIPlot1.Plot);
+
+
+        var recording_time = 1; // seconds
+        var center_freq = 1000 * 1000 * 100;  // 100 MHz
+        var sample_rate = 1000 * 1000 * 10; //10 MHz
+        var numSamples = (int)recording_time * sample_rate;//(int)recording_time * sample_rate; // 10 million samples for 1 second at 10 MHz
+        var baseband_filter = 7.5e6;
+        var lna_gain = 30; // 0 to 40 dB in 8 dB steps
+        var vga_gain = 50; // 0 to 62 dB in 2 dB steps
+
+        var configuration = new HackRFConfiguration(
+                  recordingTimeInSec: recording_time,
+                  deviceSerialNumber: "0000000000000000a09867dc386f51a3",
+                  centerFrequency: center_freq,
+                  sampleFrequency: sample_rate,
+                  numSamples: numSamples,
+                  lnaGain: lna_gain, // dB
+                  vgaGain: vga_gain, // dB
+                  filterBandwidth: baseband_filter, // MHz
+                  fftSize: 2048 * 16
+              );
+        var d = new HackRF.Namespace.HackRF(WinUIPlot1.Plot, DispatcherQueue, WinUIPlotModulation.Plot, configuration, new HackRFInteraction());
+        
+        d.Start();
+        WinUIPlot1.Refresh();
     }
 
     private Task DecodePALVideoAsync(Plot plot)
@@ -80,7 +98,6 @@ public sealed partial class MainPage : Page
            {
                try
                {
-
                    DecodePALVideo(plot);
                }
                catch (Exception ex)

@@ -6,22 +6,30 @@ using ScottPlot;
 namespace HackRF.Namespace;
 
 // https://pysdr.org/content/hackrf.html
+// to find infromation about connected HackRF devices use command line tool
+// 'hackrf_info'
 public class HackRF
 {
     private readonly Plot _plot;
     private readonly Plot _plotModulation;
-    private HackRFInteraction? _hackrfInteraction;
-    private HackRFConfiguration? _configuration;
+    private readonly HackRFInteraction _hackrfInteraction;
+    private HackRFConfiguration _configuration;
     private readonly DispatcherQueue _dispatcherQueue;
 
-    public HackRF(Plot plotSpectrogram, DispatcherQueue dispatcherQueue, Plot plotModulation)
+    private bool _stopRequested = false;
+    private CancellationTokenSource? _cts;
+    private Task? _readerTask;
+
+    public HackRF(Plot plotSpectrogram, DispatcherQueue dispatcherQueue, Plot plotModulation, HackRFConfiguration configuration, HackRFInteraction hackRFInteraction)
     {
         _dispatcherQueue = dispatcherQueue;
         _plot = plotSpectrogram;
         _plotModulation = plotModulation;
+        _configuration = configuration;
+        _hackrfInteraction = hackRFInteraction;
     }
 
-    public void GetAndVisualizeHackRFData(HackRFInteraction hackRFInteraction)
+    public HackRFConfiguration GetDfaultConfig(HackRFInteraction hackRFInteraction)
     {
         //These settings should match the hackrf_transfer example used in the textbook, and the resulting waterfall should look about the same
         var recording_time = 1; // seconds
@@ -32,75 +40,110 @@ public class HackRF
         var lna_gain = 30; // 0 to 40 dB in 8 dB steps
         var vga_gain = 50; // 0 to 62 dB in 2 dB steps
 
-        Task.Factory.StartNew(() =>
-            {
-                _configuration = new HackRFConfiguration(
-                    recordingTimeInSec: recording_time,
-                    deviceSerialNumber: "0000000000000000930464dc242ea317",
-                    centerFrequency: center_freq,
-                    sampleFrequency: sample_rate,
-                    numSamples: numSamples,
-                    lnaGain: lna_gain, // dB
-                    vgaGain: vga_gain, // dB
-                    filterBandwidth: baseband_filter // MHz
-                );
-
-                _hackrfInteraction = hackRFInteraction;
-
-                var isStarted = _hackrfInteraction.Setup(
-                     _configuration
-                 );
-
-                if (!isStarted || !_hackrfInteraction.Start())
-                {
-                    System.Console.WriteLine("Failed to start HackRF interaction.");
-                    return;
-                }
-
-                _hackrfInteraction.ReadFromHackRF(OnDataReceived);
-
-            }, TaskCreationOptions.LongRunning);
+        _configuration = new HackRFConfiguration(
+                   recordingTimeInSec: recording_time,
+                   deviceSerialNumber: "0000000000000000930464dc242ea317",
+                   centerFrequency: center_freq,
+                   sampleFrequency: sample_rate,
+                   numSamples: numSamples,
+                   lnaGain: lna_gain, // dB
+                   vgaGain: vga_gain, // dB
+                   filterBandwidth: baseband_filter, // MHz
+                   fftSize: 2048 * 16
+               );
+        return _configuration;
     }
+
+    public void Start()
+    {
+        if (_readerTask != null) return; // already running
+        _cts = new CancellationTokenSource();
+        _stopRequested = false;
+        _readerTask = Task.Run(() => RunCaptureLoop(_cts.Token), _cts.Token);
+    }
+
+    public async Task StopAsync()
+    {
+        _stopRequested = true;
+        if (_cts != null)
+        {
+            _cts.Cancel();
+        }
+        if (_readerTask != null)
+        {
+            try { await _readerTask.ConfigureAwait(false); } catch (OperationCanceledException) { }
+        }
+        _readerTask = null;
+        _cts?.Dispose();
+        _cts = null;
+        _hackrfInteraction.Stop();
+    }
+
+    private void RunCaptureLoop(CancellationToken ct)
+    {
+        var isStarted = _hackrfInteraction.Setup(
+            _configuration
+        );
+        if (!isStarted || !_hackrfInteraction.Start())
+        {
+            System.Console.WriteLine("Failed to start HackRF interaction.");
+            return;
+        }
+        try
+        {
+            while (!ct.IsCancellationRequested && !_stopRequested)
+            {
+                _hackrfInteraction.ReadFromHackRF(OnDataReceived);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Console.WriteLine($"HackRF capture loop error: {ex.Message}");
+        }
+    }
+
 
     private void OnDataReceived(Complex[] values)
     {
-        _dispatcherQueue.TryEnqueue(() =>
+        //var samples = Numpy.np.array(values)["100000:"]; // get rid of the first 100k samples just to be safe, due to transients
+        var samples = Numpy.np.array(values);
+
+        var fft_size = _configuration.FFTSize;
+        int num_rows = samples.len / fft_size;
+        var spectrogram = Numpy.np.zeros((num_rows, fft_size));
+
+        for (int i = 0; i < num_rows; i++)
+            spectrogram[$"{i}, :"] = 10 * Numpy.np.log10(Numpy.np.abs(Numpy.np.fft.fftshift(Numpy.np.fft.fft_(samples[$"{i * fft_size}:{(i + 1) * fft_size}"]))).pow(2));
+
+        double CenterFreqinMHz = _configuration.CenterFrequency / 1e6;
+
+        var lengthValues = values.Length;
+        var lengthAbsFreqs = samples.len;
+
+        int numRows = spectrogram.shape[0];
+        int numCols = spectrogram.shape[1];
+        double[] flat = spectrogram.GetData<double>();
+        double[,] spectrogramArray = new double[numRows, numCols];
+        for (int i = 0; i < numRows; i++)
+            for (int j = 0; j < numCols; j++)
+                spectrogramArray[i, j] = flat[i * numCols + j];
+        var power = spectrogram["-1"].real.GetData<double>();
+        var left = CenterFreqinMHz + _configuration.SampleFrequency / (-2.0) / 1e6;
+        var right = CenterFreqinMHz + _configuration.SampleFrequency / 2.0 / 1e6;
+        var bottom = 0;
+        var top = samples.len / ((double)_configuration.SampleFrequency / 1e6);
+        double[] freq = Numpy.np.arange(left, right, (right - left) / spectrogram["-1"].len).GetData<double>();
+
+
+        _ = _dispatcherQueue.TryEnqueue(() =>
         {
-            //var samples = Numpy.np.array(values)["100000:"]; // get rid of the first 100k samples just to be safe, due to transients
-            var samples = Numpy.np.array(values);
-
-            var fft_size = 2048 * 16;
-            int num_rows = samples.len / fft_size;
-            var spectrogram = Numpy.np.zeros((num_rows, fft_size));
-
-            for (int i = 0; i < num_rows; i++)
-                spectrogram[$"{i}, :"] = 10 * Numpy.np.log10(Numpy.np.abs(Numpy.np.fft.fftshift(Numpy.np.fft.fft_(samples[$"{i * fft_size}:{(i + 1) * fft_size}"]))).pow(2));
-
             _plot.Clear();
             _plotModulation.Clear();
-            double CenterFreqinMHz = _configuration.CenterFrequency / 1e6;
-
-            var lengthValues = values.Length;
-            var lengthAbsFreqs = samples.len;
-
-            int numRows = spectrogram.shape[0];
-            int numCols = spectrogram.shape[1];
-            double[] flat = spectrogram.GetData<double>();
-            double[,] spectrogramArray = new double[numRows, numCols];
-            for (int i = 0; i < numRows; i++)
-                for (int j = 0; j < numCols; j++)
-                    spectrogramArray[i, j] = flat[i * numCols + j];
-
             var hm = _plot.Add.Heatmap(spectrogramArray);
             _plot.YLabel("Time (s)");
             _plot.XLabel("Frequency (Hz)");
 
             // Define the heatmap's boundaries using its Extent
-            var left = CenterFreqinMHz + _configuration.SampleFrequency / (-2.0) / 1e6;
-            var right = CenterFreqinMHz + _configuration.SampleFrequency / 2.0 / 1e6;
-            var bottom = 0;
-            var top = samples.len / ((double)_configuration.SampleFrequency / 1e6);
-
             hm.Extent = new ScottPlot.CoordinateRect(
                 left: left,
                 right: right,
@@ -114,9 +157,7 @@ public class HackRF
 
             _plot.Axes.MarginsX(0.1);
 
-            double[] freq = Numpy.np.arange(left, right, (right - left) / spectrogram["-1"].len).GetData<double>();
-
-            _plotModulation.Add.SignalXY(freq, spectrogram["-1"].real.GetData<double>());
+            _plotModulation.Add.SignalXY(freq, power);
             _plotModulation.YLabel("Power");
             _plotModulation.XLabel("Frequency (Hz)");
             _plotModulation.Axes.SetLimitsX(left, right);
@@ -147,7 +188,9 @@ public class HackRFConfiguration
     public int VgaGain { get; set; }
     public double FilterBandwidth { get; set; }
 
-    public HackRFConfiguration(int recordingTimeInSec, string deviceSerialNumber, int centerFrequency, int sampleFrequency, int numSamples, int lnaGain, int vgaGain, double filterBandwidth)
+    public int FFTSize { get; set; }
+
+    public HackRFConfiguration(int recordingTimeInSec, string deviceSerialNumber, int centerFrequency, int sampleFrequency, int numSamples, int lnaGain, int vgaGain, double filterBandwidth, int fftSize)
     {
         RecordingTimeInSec = recordingTimeInSec;
         DeviceSerialNumber = deviceSerialNumber;
@@ -157,6 +200,7 @@ public class HackRFConfiguration
         LnaGain = lnaGain;
         VgaGain = vgaGain;
         FilterBandwidth = filterBandwidth;
+        FFTSize = fftSize;
     }
 }
 
@@ -198,7 +242,9 @@ public class HackRFInteraction
         var foundDeviceByName = devices.FirstOrDefault(device => device.serial_number == _hackRFConfiguration.DeviceSerialNumber);
         if (foundDeviceByName == null)
         {
-            System.Console.WriteLine($"No hackrf devices were found with the specified serial number {_hackRFConfiguration.DeviceSerialNumber} will be using the first one in the list");
+            var notfoundError = $"No hackrf devices were found with the specified serial number {_hackRFConfiguration.DeviceSerialNumber} will be using the first one in the list";
+            System.Console.WriteLine(notfoundError);
+            throw new EntryPointNotFoundException(notfoundError);
         }
 
         _device = (foundDeviceByName ?? devices[0]).OpenDevice(); // connecting to the first transceiver in the list
@@ -224,6 +270,20 @@ public class HackRFInteraction
         _dataStream = _device?.StartRX();
 
         return true;
+    }
+
+    public void Stop()
+    {
+        try
+        {
+            _dataStream?.Dispose();
+            _dataStream = null;
+            _device?.Reset();
+        }
+        catch (Exception ex)
+        {
+            System.Console.WriteLine($"Error stopping HackRF: {ex.Message}");
+        }
     }
 
     public void ReadFromHackRF(Action<Complex[]> onDataRecieved)
