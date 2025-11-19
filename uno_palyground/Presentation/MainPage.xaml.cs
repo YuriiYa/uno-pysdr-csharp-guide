@@ -68,7 +68,7 @@ public sealed partial class MainPage : Page
 
 
         var recording_time = 1; // seconds
-        var center_freq = 1000 * 1000 * 100;  // 100 MHz
+        var center_freq = 1000 * 471250;  // 471.25 MHz
         var sample_rate = 1000 * 1000 * 10; //10 MHz
         var numSamples = (int)recording_time * sample_rate;//(int)recording_time * sample_rate; // 10 million samples for 1 second at 10 MHz
         var baseband_filter = 7.5e6;
@@ -84,7 +84,7 @@ public sealed partial class MainPage : Page
                   lnaGain: lna_gain, // dB
                   vgaGain: vga_gain, // dB
                   filterBandwidth: baseband_filter, // MHz
-                  fftSize: 2048 * 16
+                  fftSize: 2048 * 4 * 16
               );
         var d = new HackRF.Namespace.HackRF(WinUIPlot1.Plot, DispatcherQueue, WinUIPlotModulation.Plot, configuration, new HackRFInteraction());
         

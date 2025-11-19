@@ -86,8 +86,9 @@ public class HackRF
         );
         if (!isStarted || !_hackrfInteraction.Start())
         {
-            System.Console.WriteLine("Failed to start HackRF interaction.");
-            return;
+            var error ="Failed to start HackRF interaction.";
+            System.Console.WriteLine(error);
+            throw new EntryPointNotFoundException(error);
         }
         try
         {
@@ -244,7 +245,7 @@ public class HackRFInteraction
         {
             var notfoundError = $"No hackrf devices were found with the specified serial number {_hackRFConfiguration.DeviceSerialNumber} will be using the first one in the list";
             System.Console.WriteLine(notfoundError);
-            throw new EntryPointNotFoundException(notfoundError);
+            return false;
         }
 
         _device = (foundDeviceByName ?? devices[0]).OpenDevice(); // connecting to the first transceiver in the list

@@ -293,46 +293,60 @@ public class PALDecoder
             buffer = new byte[height, width, 3];
     }
 
-    public void DecodePALSignal(int sampleRate, FileStream fs)
-    {
-        int samplesPerLine = (int)(PAL_LINE_DURATION * sampleRate); // expected ≈ 64e-6 * fs
-        int samplesPerFrame = samplesPerLine * PAL_LINES_PER_FRAME;  // Complex samples per full frame
+    // Legacy entry point retained for convenience; delegates to Stream overload.
+    public void DecodePALSignal(int sampleRate, FileStream fs) => DecodePALSignal(sampleRate, (Stream)fs);
 
-        // Configure ring buffer (2 frames capacity gives margin for wrap)
-        try { IQWavReader.ConfigureRingBuffer(samplesPerFrame * 2); } catch { /* ignore */ }
+    // New generic Stream variant. If the stream is not a FileStream (e.g. live HackRF),
+    // frame count is unknown and decoding proceeds until reads fail.
+    public void DecodePALSignal(int sampleRate, Stream stream)
+    {
+        int samplesPerLine = (int)(PAL_LINE_DURATION * sampleRate);
+        int samplesPerFrame = samplesPerLine * PAL_LINES_PER_FRAME;
+        bool isFile = stream is FileStream;
+        var file = stream as FileStream;
+
+        if (isFile)
+        {
+            // Configure ring buffer only for file-based replay.
+            try { IQWavReader.ConfigureRingBuffer(samplesPerFrame * 2); } catch { /* ignore */ }
+        }
 
         double[] videoSignal = new double[samplesPerFrame];
-        if (!ReadAndDemodFrame(fs, samplesPerFrame, videoSignal))
+        if (!ReadAndDemodFrame(stream, samplesPerFrame, videoSignal))
         {
             Console.WriteLine("No samples available for PAL decoding (initial frame).");
             return;
         }
         int frameStart = FindFrameStart(videoSignal, sampleRate, samplesPerLine);
         int autoHOffset = EstimateHorizontalOffset(videoSignal, frameStart, samplesPerLine, sampleRate);
-        int skipUntil = frameStart + autoHOffset; // in samples
+        int skipUntil = frameStart + autoHOffset;
 
         var nonVideoData = (int)Math.Round((1.5 + 4.7 + 5.8) * 1e-6 * sampleRate);
         var delta = (samplesPerLine - nonVideoData) / 2 + nonVideoData;
         if (skipUntil < 0) skipUntil = 0;
         if (skipUntil > samplesPerFrame) skipUntil = samplesPerFrame;
 
-        // We already consumed the first frame from the stream.
-        // For simplicity we drop it after using it for sync (could reuse remaining part later if wanted).
-        // Advance stream additional 'skipUntil' samples relative to NEXT frames (since first frame discarded):
-        // (If you want to reuse the first frame's active area, refactor instead of skipping here.)
-        SkipSamplesStreaming(fs, skipUntil);
-        // align frame horizontally by skipping non video data
-        SkipSamplesStreaming(fs, delta);
+        // Advance / discard alignment samples.
+        SkipSamplesStreamingGeneric(stream, skipUntil);
+        SkipSamplesStreamingGeneric(stream, delta);
 
-        long remainingComplexSamples = (fs.Length - fs.Position) / 4; // remaining samples in file
-        long numberOfFrames = remainingComplexSamples / samplesPerFrame;
-        if (numberOfFrames <= 0)
+        long numberOfFrames;
+        if (isFile)
         {
-            Console.WriteLine("No complete frames remain after initial sync frame.");
-            return;
+            long remainingComplexSamples = (file!.Length - file.Position) / 4; // assumes 4 bytes per complex sample in file path
+            numberOfFrames = remainingComplexSamples / samplesPerFrame;
+            if (numberOfFrames <= 0)
+            {
+                Console.WriteLine("No complete frames remain after initial sync frame.");
+                return;
+            }
+            Console.WriteLine($"Decoding {numberOfFrames} frames (samplesPerLine={samplesPerLine}, samplesPerFrame={samplesPerFrame}).");
         }
-
-        Console.WriteLine($"Decoding {numberOfFrames} frames (samplesPerLine={samplesPerLine}, samplesPerFrame={samplesPerFrame}).");
+        else
+        {
+            numberOfFrames = long.MaxValue; // continuous
+            Console.WriteLine("Decoding continuous stream (unknown frame count)...");
+        }
 
         double[] frameData = new double[samplesPerFrame];
         // Precompute active-width parameters (constant across frames for given sampleRate)
@@ -358,7 +372,7 @@ public class PALDecoder
             {
                 Console.WriteLine($"Decoding frame {frameIndex + 1}/{numberOfFrames}...");
                 long frameFieldCopyTicks = 0, frameLumaChromaTicks = 0, frameChromaDecodeTicks = 0, frameCropTicks = 0, frameRgbTicks = 0, frameInterleaveTicks = 0;
-                if (!ReadAndDemodFrame(fs, samplesPerFrame, frameData))
+                if (!ReadAndDemodFrame(stream, samplesPerFrame, frameData))
                 {
                     Console.WriteLine($"Short read at frame {frameIndex}; expected {samplesPerFrame} samples. Stopping.");
                     return (breakResult: true, continueResult: false);
@@ -537,34 +551,60 @@ public class PALDecoder
             }
 
             DisplayVideoFrame(rgbFrame);
+
+            if (!isFile && rgbFrame == null)
+            {
+                Console.WriteLine("Continuous stream ended.");
+                break;
+            }
         }
     }
 
     // Streaming reader + AM magnitude demodulation into provided buffer.
     // Returns false if EOF before filling buffer.
-    private bool ReadAndDemodFrame(FileStream fs, int samplesPerFrame, double[] frameBuffer)
+    private bool ReadAndDemodFrame(Stream source, int samplesPerFrame, double[] frameBuffer)
     {
         int filled = 0;
         double sum = 0;
         while (filled < samplesPerFrame)
         {
             int need = samplesPerFrame - filled;
-            var seg = IQWavReader.ReadIQIntoRingOptimized(fs, need);
-            if (seg.IsEmpty) break; // EOF
-
-            var first = seg.First;
-            for (int i = 0; i < first.Length; i++)
+            if (source is FileStream fsrc)
             {
-                double mag = first[i].Magnitude;
-                frameBuffer[filled++] = mag;
-                sum += mag;
+                var seg = IQWavReader.ReadIQIntoRingOptimized(fsrc, need);
+                if (seg.IsEmpty) break; // EOF
+                var first = seg.First;
+                for (int i = 0; i < first.Length; i++)
+                {
+                    double mag = first[i].Magnitude;
+                    frameBuffer[filled++] = mag;
+                    sum += mag;
+                }
+                var second = seg.Second;
+                for (int i = 0; i < second.Length && filled < samplesPerFrame; i++)
+                {
+                    double mag = second[i].Magnitude;
+                    frameBuffer[filled++] = mag;
+                    sum += mag;
+                }
             }
-            var second = seg.Second;
-            for (int i = 0; i < second.Length && filled < samplesPerFrame; i++)
+            else
             {
-                double mag = second[i].Magnitude;
-                frameBuffer[filled++] = mag;
-                sum += mag;
+                // Fallback continuous stream reader: assume int8 I,Q interleaved.
+                const int bytesPerSample = 2; // I + Q (signed 8-bit)
+                int bytesNeeded = need * bytesPerSample;
+                byte[] tmp = new byte[Math.Min(bytesNeeded, 8192)];
+                int read = source.Read(tmp, 0, tmp.Length);
+                if (read <= 0) break;
+                int samplesRead = read / bytesPerSample;
+                for (int s = 0; s < samplesRead && filled < samplesPerFrame; s++)
+                {
+                    double iVal = (sbyte)tmp[2 * s] / 128.0;
+                    double qVal = (sbyte)tmp[2 * s + 1] / 128.0;
+                    double mag = Math.Sqrt(iVal * iVal + qVal * qVal);
+                    frameBuffer[filled++] = mag;
+                    sum += mag;
+                }
             }
         }
         if (filled < samplesPerFrame) return false;
@@ -582,6 +622,27 @@ public class PALDecoder
             var seg = IQWavReader.ReadIQIntoRingOptimized(fs, chunk);
             if (seg.IsEmpty) break; // EOF
             remaining -= seg.SamplesRead;
+        }
+    }
+
+    // Generic skip: discard raw bytes for non-FileStream sources (assumes 2 bytes per complex sample int8 I,Q).
+    private static void SkipSamplesStreamingGeneric(Stream stream, int samplesToSkip)
+    {
+        if (samplesToSkip <= 0) return;
+        if (stream is FileStream fs)
+        {
+            SkipSamplesStreaming(fs, samplesToSkip);
+            return;
+        }
+        const int bytesPerSample = 2;
+        long bytesToDiscard = (long)samplesToSkip * bytesPerSample;
+        byte[] buffer = new byte[Math.Min(bytesToDiscard, 8192)];
+        while (bytesToDiscard > 0)
+        {
+            int want = (int)Math.Min(bytesToDiscard, buffer.Length);
+            int read = stream.Read(buffer, 0, want);
+            if (read <= 0) break;
+            bytesToDiscard -= read;
         }
     }
 
