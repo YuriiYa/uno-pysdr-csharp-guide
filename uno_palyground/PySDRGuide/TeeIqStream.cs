@@ -38,6 +38,44 @@ namespace HackRF.Namespace
             _dataEvent.Set();
         }
 
+        // Discard queued data older than the last frameBytes worth; keeps only most recent segment to reduce latency.
+        // frameBytes: number of raw interleaved I/Q bytes representing one PAL frame (samplesPerFrame * 2).
+        public int DrainToLatestFrame(int frameBytes)
+        {
+            if (frameBytes <= 0) return 0;
+            lock (_sync)
+            {
+                if (_queue.IsEmpty) return 0;
+                // Aggregate all queued buffers
+                int total = 0;
+                foreach (var b in _queue) total += b.Length;
+                if (total <= frameBytes) return total; // nothing to drain; we keep all
+                // Build combined tail slice of size frameBytes
+                byte[] combined = new byte[frameBytes];
+                int copyStart = total - frameBytes; // offset into concatenated stream
+                int copied = 0;
+                int traversed = 0;
+                foreach (var b in _queue)
+                {
+                    int nextTraversed = traversed + b.Length;
+                    if (nextTraversed > copyStart && copied < frameBytes)
+                    {
+                        int srcOffset = Math.Max(0, copyStart - traversed);
+                        int available = b.Length - srcOffset;
+                        int toCopy = Math.Min(available, frameBytes - copied);
+                        Buffer.BlockCopy(b, srcOffset, combined, copied, toCopy);
+                        copied += toCopy;
+                    }
+                    traversed = nextTraversed;
+                }
+                // Replace queue with single latest frame buffer
+                while (_queue.TryDequeue(out _)) { }
+                _queue.Enqueue(combined);
+                _current = null; _offset = 0; // reset current cursor so reader starts at new buffer
+                return frameBytes;
+            }
+        }
+
         public override int Read(byte[] dest, int offset, int count)
         {
             if (dest == null) throw new ArgumentNullException(nameof(dest));

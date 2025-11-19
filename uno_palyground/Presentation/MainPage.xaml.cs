@@ -101,7 +101,6 @@ public sealed partial class MainPage : Page
                 Console.WriteLine("HackRF IQ stream not available for PAL decoding.");
                 return;
             }
-            hackrf.ActivatePalDecodeMode();
             Console.WriteLine("Starting live PAL decode from HackRF stream...");
             palDecoder.DecodePALSignal(sample_rate, liveStream);
         }, TaskCreationOptions.LongRunning);

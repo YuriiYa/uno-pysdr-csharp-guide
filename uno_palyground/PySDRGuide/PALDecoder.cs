@@ -372,6 +372,11 @@ public class PALDecoder
             {
                 Console.WriteLine($"Decoding frame {frameIndex + 1}/{numberOfFrames}...");
                 long frameFieldCopyTicks = 0, frameLumaChromaTicks = 0, frameChromaDecodeTicks = 0, frameCropTicks = 0, frameRgbTicks = 0, frameInterleaveTicks = 0;
+                // For continuous live sources, discard backlog to minimize latency.
+                if (!isFile && stream is HackRF.Namespace.TeeIqStream tee)
+                {
+                    tee.DrainToLatestFrame(samplesPerFrame * 2); // raw bytes (I,Q int8) per frame
+                }
                 if (!ReadAndDemodFrame(stream, samplesPerFrame, frameData))
                 {
                     Console.WriteLine($"Short read at frame {frameIndex}; expected {samplesPerFrame} samples. Stopping.");

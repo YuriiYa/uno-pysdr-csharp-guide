@@ -19,7 +19,7 @@ public class HackRF
     private bool _stopRequested = false;
     private CancellationTokenSource? _cts;
     private Task? _readerTask;
-    private bool _palDecodeActive; // retained for future conditional logic (not suppressing spectrogram now)
+    // Removed PAL decode suppression flag (tee stream allows simultaneous processing)
     private TeeIqStream? _teeStream;
 
     public HackRF(Plot plotSpectrogram, DispatcherQueue dispatcherQueue, Plot plotModulation, HackRFConfiguration configuration, HackRFInteraction hackRFInteraction)
@@ -67,7 +67,7 @@ public class HackRF
     // Provide raw IQ stream access (may be null until Start() completes and RX begins).
     public Stream? GetRawIqStream() => _hackrfInteraction.GetRxStream();
 
-    public void ActivatePalDecodeMode() => _palDecodeActive = true;
+    // Activation no longer required since we don't suppress spectrogram during PAL decoding.
 
     // Tee stream exposing duplicated IQ bytes independent of underlying device stream.
     public Stream? GetTeeStream() => _teeStream;
