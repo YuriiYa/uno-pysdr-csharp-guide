@@ -130,40 +130,40 @@ public class HackRF
 
         int numRows = spectrogram.shape[0];
         int numCols = spectrogram.shape[1];
-        double[] flat = spectrogram.GetData<double>();
-        double[,] spectrogramArray = new double[numRows, numCols];
-        for (int i = 0; i < numRows; i++)
-            for (int j = 0; j < numCols; j++)
-                spectrogramArray[i, j] = flat[i * numCols + j];
+        // double[] flat = spectrogram.GetData<double>();
+        // double[,] spectrogramArray = new double[numRows, numCols];
+        // for (int i = 0; i < numRows; i++)
+        //     for (int j = 0; j < numCols; j++)
+        //         spectrogramArray[i, j] = flat[i * numCols + j];
         var power = spectrogram["-1"].real.GetData<double>();
         var left = CenterFreqinMHz + _configuration.SampleFrequency / (-2.0) / 1e6;
         var right = CenterFreqinMHz + _configuration.SampleFrequency / 2.0 / 1e6;
-        var bottom = 0;
-        var top = samples.len / ((double)_configuration.SampleFrequency / 1e6);
+        //var bottom = 0;
+        //var top = samples.len / ((double)_configuration.SampleFrequency / 1e6);
         double[] freq = Numpy.np.arange(left, right, (right - left) / spectrogram["-1"].len).GetData<double>();
 
 
         _ = _dispatcherQueue.TryEnqueue(() =>
         {
-            _plot.Clear();
+           // _plot.Clear();
             _plotModulation.Clear();
-            var hm = _plot.Add.Heatmap(spectrogramArray);
-            _plot.YLabel("Time (s)");
-            _plot.XLabel("Frequency (Hz)");
+            // var hm = _plot.Add.Heatmap(spectrogramArray);
+            // _plot.YLabel("Time (s)");
+            // _plot.XLabel("Frequency (Hz)");
 
             // Define the heatmap's boundaries using its Extent
-            hm.Extent = new ScottPlot.CoordinateRect(
-                left: left,
-                right: right,
-                bottom: bottom,
-                top: top
-             );
+            // hm.Extent = new ScottPlot.CoordinateRect(
+            //     left: left,
+            //     right: right,
+            //     bottom: bottom,
+            //     top: top
+            //  );
 
-            _plot.Axes.InvertY();
-            _plot.Axes.SetLimitsX(left, right);
-            _plot.Axes.SetLimitsY(bottom, top);
+            // _plot.Axes.InvertY();
+            // _plot.Axes.SetLimitsX(left, right);
+            // _plot.Axes.SetLimitsY(bottom, top);
 
-            _plot.Axes.MarginsX(0.1);
+            // _plot.Axes.MarginsX(0.1);
 
             _plotModulation.Add.SignalXY(freq, power);
             _plotModulation.YLabel("Power");
@@ -171,15 +171,15 @@ public class HackRF
             _plotModulation.Axes.SetLimitsX(left, right);
 
             PixelPadding padding = new(50, 20, 30, 5);
-            _plot.Layout.Fixed(padding);
+            // _plot.Layout.Fixed(padding);
             _plotModulation.Layout.Fixed(padding);
 
-            _plot.Axes.Link(_plotModulation, x: true, y: false);
+            // _plot.Axes.Link(_plotModulation, x: true, y: false);
             _plotModulation.Axes.Link(_plot, x: true, y: false);
 
             _plotModulation.Axes.AutoScale();
-            _plot.Axes.AutoScale();
-            _plot.PlotControl?.Refresh();
+            // _plot.Axes.AutoScale();
+            // _plot.PlotControl?.Refresh();
             _plotModulation.PlotControl?.Refresh();
         });
     }
