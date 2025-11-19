@@ -19,7 +19,8 @@ public class HackRF
     private bool _stopRequested = false;
     private CancellationTokenSource? _cts;
     private Task? _readerTask;
-    private bool _palDecodeActive;
+    private bool _palDecodeActive; // retained for future conditional logic (not suppressing spectrogram now)
+    private TeeIqStream? _teeStream;
 
     public HackRF(Plot plotSpectrogram, DispatcherQueue dispatcherQueue, Plot plotModulation, HackRFConfiguration configuration, HackRFInteraction hackRFInteraction)
     {
@@ -68,6 +69,9 @@ public class HackRF
 
     public void ActivatePalDecodeMode() => _palDecodeActive = true;
 
+    // Tee stream exposing duplicated IQ bytes independent of underlying device stream.
+    public Stream? GetTeeStream() => _teeStream;
+
     public async Task StopAsync()
     {
         _stopRequested = true;
@@ -96,24 +100,32 @@ public class HackRF
             System.Console.WriteLine(error);
             throw new EntryPointNotFoundException(error);
         }
+        _teeStream = new TeeIqStream();
         try
         {
             while (!ct.IsCancellationRequested && !_stopRequested)
             {
-                _hackrfInteraction.ReadFromHackRF(OnDataReceived);
+                _hackrfInteraction.ReadFromHackRF((samplesBytes, complexValuesLength) => OnDataReceived(samplesBytes, complexValuesLength));
             }
         }
         catch (Exception ex)
         {
             System.Console.WriteLine($"HackRF capture loop error: {ex.Message}");
         }
+        _teeStream?.Complete();
     }
 
-
-    private void OnDataReceived(Complex[] values)
+    private void OnDataReceived(byte[] rawBytes, int complexCount)
     {
-        if (_palDecodeActive) return; // PAL decoder consuming raw stream; skip spectrogram processing
-        //var samples = Numpy.np.array(values)["100000:"]; // get rid of the first 100k samples just to be safe, due to transients
+        // Feed tee stream for PAL decoder consumption
+        _teeStream?.AddChunk(rawBytes, rawBytes.Length);
+
+        // Convert bytes to complex for power display
+        Complex[] values = new Complex[complexCount];
+        for (int i = 0; i < complexCount; i++)
+        {
+            values[i] = new Complex((sbyte)rawBytes[2 * i], (sbyte)rawBytes[2 * i + 1]) / 128.0;
+        }
         var samples = Numpy.np.array(values);
 
         var fft_size = _configuration.FFTSize;
@@ -297,7 +309,7 @@ public class HackRFInteraction
         }
     }
 
-    public void ReadFromHackRF(Action<Complex[]> onDataRecieved)
+    public void ReadFromHackRF(Action<byte[], int> onDataRecieved)
     {
 
         byte[] buffer;
@@ -307,9 +319,9 @@ public class HackRFInteraction
         {
             if (_dataStream == null || !_dataStream.CanRead) return;
             var valid_length = _dataStream.Read(buffer, 0, buffer.Length); // reading interpolated IQ data from stream
-            System.Console.WriteLine("demodulating...");
-            var IQ_data = ConvertToIQ(buffer, valid_length); // converting interpolated IQ data to complex array
-            onDataRecieved(IQ_data);
+            if (valid_length <= 0) return;
+            int complexCount = valid_length / 2;
+            onDataRecieved(buffer, complexCount);
 
         }
         catch (Exception ex)
@@ -319,16 +331,7 @@ public class HackRFInteraction
         }
     }
 
-    static Complex[] ConvertToIQ(byte[] buffer, int valid_length)
-    {
-        var halfLength = valid_length / 2;
-        Complex[] ret = new Complex[halfLength];
-        for (int i = 0; i < ret.Length; i++)
-        {
-            ret[i] = new Complex((sbyte)buffer[2 * i], (sbyte)buffer[2 * i + 1]) / 128; // even are real and odd are img numbers and adjuct it to -1 to +1;
-        }
-        return ret;
-    }
+    // ConvertToIQ no longer needed; inline conversion performed in OnDataReceived.
 
 
     static double[] coefs = { -0.006052, -0.005539, -0.007277, -0.008615, -0.009164, -0.008511, -0.006271, -0.002146, 0.004031, 0.012244, 0.022290, 0.033752, 0.046049, 0.058433, 0.070094, 0.080216, 0.088051, 0.093009, 0.094705, 0.093009, 0.088051, 0.080216, 0.070094, 0.058433, 0.046049, 0.033752, 0.022290, 0.012244, 0.004031, -0.002146, -0.006271, -0.008511, -0.009164, -0.008615, -0.007277, -0.005539, -0.006052 };

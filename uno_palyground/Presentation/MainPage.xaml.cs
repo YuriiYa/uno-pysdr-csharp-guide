@@ -94,8 +94,8 @@ public sealed partial class MainPage : Page
         var palDecoder = new PALDecoder(WinUIPlot1.Plot, DispatcherQueue);
         _ = Task.Factory.StartNew(async () =>
         {
-            for (int i = 0; i < 50 && hackrf.GetRawIqStream() == null; i++) await Task.Delay(100);
-            var liveStream = hackrf.GetRawIqStream();
+            for (int i = 0; i < 50 && hackrf.GetTeeStream() == null; i++) await Task.Delay(100);
+            var liveStream = hackrf.GetTeeStream();
             if (liveStream == null)
             {
                 Console.WriteLine("HackRF IQ stream not available for PAL decoding.");
