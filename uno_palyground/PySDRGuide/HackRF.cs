@@ -19,6 +19,7 @@ public class HackRF
     private bool _stopRequested = false;
     private CancellationTokenSource? _cts;
     private Task? _readerTask;
+    private bool _palDecodeActive;
 
     public HackRF(Plot plotSpectrogram, DispatcherQueue dispatcherQueue, Plot plotModulation, HackRFConfiguration configuration, HackRFInteraction hackRFInteraction)
     {
@@ -61,6 +62,11 @@ public class HackRF
         _stopRequested = false;
         _readerTask = Task.Run(() => RunCaptureLoop(_cts.Token), _cts.Token);
     }
+
+    // Provide raw IQ stream access (may be null until Start() completes and RX begins).
+    public Stream? GetRawIqStream() => _hackrfInteraction.GetRxStream();
+
+    public void ActivatePalDecodeMode() => _palDecodeActive = true;
 
     public async Task StopAsync()
     {
@@ -106,6 +112,7 @@ public class HackRF
 
     private void OnDataReceived(Complex[] values)
     {
+        if (_palDecodeActive) return; // PAL decoder consuming raw stream; skip spectrogram processing
         //var samples = Numpy.np.array(values)["100000:"]; // get rid of the first 100k samples just to be safe, due to transients
         var samples = Numpy.np.array(values);
 
@@ -272,6 +279,9 @@ public class HackRFInteraction
 
         return true;
     }
+
+    // Expose underlying continuous IQ byte stream (interleaved int8 I,Q) for decoders expecting a Stream.
+    public Stream? GetRxStream() => _dataStream;
 
     public void Stop()
     {

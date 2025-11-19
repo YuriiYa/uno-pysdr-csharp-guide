@@ -86,10 +86,25 @@ public sealed partial class MainPage : Page
                   filterBandwidth: baseband_filter, // MHz
                   fftSize: 2048 * 4 * 16
               );
-        var d = new HackRF.Namespace.HackRF(WinUIPlot1.Plot, DispatcherQueue, WinUIPlotModulation.Plot, configuration, new HackRFInteraction());
-        
-        d.Start();
+        var hackrf = new HackRF.Namespace.HackRF(WinUIPlot1.Plot, DispatcherQueue, WinUIPlotModulation.Plot, configuration, new HackRFInteraction());
+        hackrf.Start();
         WinUIPlot1.Refresh();
+
+        // Start PAL decoding from live HackRF stream on a background task.
+        var palDecoder = new PALDecoder(WinUIPlot1.Plot, DispatcherQueue);
+        _ = Task.Factory.StartNew(async () =>
+        {
+            for (int i = 0; i < 50 && hackrf.GetRawIqStream() == null; i++) await Task.Delay(100);
+            var liveStream = hackrf.GetRawIqStream();
+            if (liveStream == null)
+            {
+                Console.WriteLine("HackRF IQ stream not available for PAL decoding.");
+                return;
+            }
+            hackrf.ActivatePalDecodeMode();
+            Console.WriteLine("Starting live PAL decode from HackRF stream...");
+            palDecoder.DecodePALSignal(sample_rate, liveStream);
+        }, TaskCreationOptions.LongRunning);
     }
 
     private Task DecodePALVideoAsync(Plot plot)
