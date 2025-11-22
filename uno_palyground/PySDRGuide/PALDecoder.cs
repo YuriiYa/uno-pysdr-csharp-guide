@@ -195,6 +195,7 @@ public enum FieldOrder
 public class PALDecoder
 {
     private readonly Plot _plot;
+    private readonly Plot _plotModulation;
     private readonly DispatcherQueue _dispatcherQueue;
     private readonly SystemProfile _profile;
     private readonly FieldOrder _fieldOrder;
@@ -215,9 +216,10 @@ public class PALDecoder
     private const int CHROMA_SEPARATION_TAPS = 81;  // unified length (was 81 already)
     private const int CHROMA_BASEBAND_LPF_TAPS = 63; // after demod low-pass; can be shorter
 
-    public PALDecoder(Plot plot, DispatcherQueue dispatcherQueue, TvSystem system = TvSystem.PAL_DK, FieldOrder fieldOrder = FieldOrder.BottomFieldFirst)
+    public PALDecoder(Plot plot, Plot plotModulation, DispatcherQueue dispatcherQueue, TvSystem system = TvSystem.PAL_DK, FieldOrder fieldOrder = FieldOrder.BottomFieldFirst)
     {
         _plot = plot;
+        _plotModulation = plotModulation;
         _dispatcherQueue = dispatcherQueue;
         _profile = SystemProfile.For(system);
         _fieldOrder = fieldOrder;
@@ -327,8 +329,7 @@ public class PALDecoder
         if (skipUntil > samplesPerFrame) skipUntil = samplesPerFrame;
 
         // Advance / discard alignment samples.
-        SkipSamplesStreamingGeneric(stream, skipUntil);
-        SkipSamplesStreamingGeneric(stream, delta);
+        SkipSamplesStreamingGeneric(stream, skipUntil+delta);
 
         long numberOfFrames;
         if (isFile)
@@ -806,7 +807,7 @@ public class PALDecoder
             return 0;
         }
 
-        int searchLength = Math.Min(videoSignal.Length, Math.Max(sampleRate / 4, samplesPerLine * 625));
+        int searchLength = Math.Min(videoSignal.Length, Math.Max(sampleRate / 4, samplesPerLine * PAL_LINES_PER_FRAME));
         var segment = LightLowPass(videoSignal.Take(searchLength).ToArray());
 
         // auto polarity
@@ -1394,6 +1395,10 @@ public class PALDecoder
            _plot.Title("PAL Video Frame");
            _plot.Axes.SetLimitsX(0, width);
            _plot.Axes.SetLimitsY(0, height);
+           
+
+           _plot.Axes.Link(_plotModulation, x: true, y: false);
+           _plotModulation.PlotControl?.Refresh();
            _plot.PlotControl?.Refresh();
 
            Console.WriteLine($"Decoded PAL frame: {width}x{height} pixels");

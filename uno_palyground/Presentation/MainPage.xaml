@@ -9,27 +9,17 @@
       xmlns:ScottPlot="using:ScottPlot.WinUI"
       Background="{ThemeResource BackgroundBrush}">
   <ScrollViewer IsTabStop="True">
-    <Grid utu:SafeArea.Insets="VisibleBounds">
+    <Grid>
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto"/>
         <RowDefinition Height="*"/>
         <RowDefinition Height="3*"/>
       </Grid.RowDefinitions>
       <utu:NavigationBar Content="{Binding Title}"/>
-      <ScottPlot:WinUIPlot x:Name="WinUIPlotModulation"
-                           Grid.Row="1"/>
-      <ScottPlot:WinUIPlot x:Name="WinUIPlot1"
-                           Grid.Row="2"/>
-      <!--<StackPanel Grid.Row="3"
-            HorizontalAlignment="Center"
-            VerticalAlignment="Center"
-            Spacing="16">
-        <TextBox Text="{Binding Name, Mode=TwoWay}"
-            PlaceholderText="Enter your name:" />
-        <Button Content="Go to Second Page"
-            AutomationProperties.AutomationId="SecondPageButton"
-            Command="{Binding GoToSecond}" />
-      </StackPanel>-->
+      <ScottPlot:WinUIPlot  Grid.Row="1"
+          x:Name="WinUIPlotModulation"/>
+      <ScottPlot:WinUIPlot Grid.Row="2"
+          x:Name="WinUIPlotVideo"/>
     </Grid>
   </ScrollViewer>
 </Page>

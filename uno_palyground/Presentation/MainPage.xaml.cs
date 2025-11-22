@@ -86,12 +86,11 @@ public sealed partial class MainPage : Page
                   filterBandwidth: baseband_filter, // MHz
                   fftSize: 2048 * 4 * 16
               );
-        var hackrf = new HackRF.Namespace.HackRF(WinUIPlot1.Plot, DispatcherQueue, WinUIPlotModulation.Plot, configuration, new HackRFInteraction());
+        var hackrf = new HackRF.Namespace.HackRF(WinUIPlotVideo.Plot, DispatcherQueue, WinUIPlotModulation.Plot, configuration, new HackRFInteraction());
         hackrf.Start();
-        WinUIPlot1.Refresh();
 
         // Start PAL decoding from live HackRF stream on a background task.
-        var palDecoder = new PALDecoder(WinUIPlot1.Plot, DispatcherQueue);
+        var palDecoder = new PALDecoder(WinUIPlotVideo.Plot, WinUIPlotModulation.Plot, DispatcherQueue);
         _ = Task.Factory.StartNew(async () =>
         {
             for (int i = 0; i < 50 && hackrf.GetTeeStream() == null; i++) await Task.Delay(100);
@@ -136,7 +135,7 @@ public sealed partial class MainPage : Page
         WavHelper.PrintWavHeader(header);
 
         // Initialize PAL decoder
-        var palDecoder = new PALDecoder(plot, DispatcherQueue);
+        var palDecoder = new PALDecoder(plot, WinUIPlotModulation.Plot, DispatcherQueue);
 
         // Decode PAL signal (assuming 10 MHz sample rate)
         // Ring buffer size: 2 frames worth (approx). Reserve after reading header so we know sample rate.
