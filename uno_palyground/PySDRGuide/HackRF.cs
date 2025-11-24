@@ -120,53 +120,53 @@ public class HackRF
         // Feed tee stream for PAL decoder consumption
         _teeStream?.AddChunk(rawBytes, rawBytes.Length);
 
-        // Convert bytes to complex for power display
-        Complex[] values = new Complex[complexCount];
-        for (int i = 0; i < complexCount; i++)
-        {
-            values[i] = new Complex((sbyte)rawBytes[2 * i], (sbyte)rawBytes[2 * i + 1]) / 128.0;
-        }
-        var samples = Numpy.np.array(values);
+        // // Convert bytes to complex for power display
+        // Complex[] values = new Complex[complexCount];
+        // for (int i = 0; i < complexCount; i++)
+        // {
+        //     values[i] = new Complex((sbyte)rawBytes[2 * i], (sbyte)rawBytes[2 * i + 1]) / 128.0;
+        // }
+        // var samples = Numpy.np.array(values);
 
-        var fft_size = _configuration.FFTSize;
-        int num_rows = samples.len / fft_size;
-        var spectrogram = Numpy.np.zeros((num_rows, fft_size));
+        // var fft_size = _configuration.FFTSize;
+        // int num_rows = samples.len / fft_size;
+        // var spectrogram = Numpy.np.zeros((num_rows, fft_size));
 
-        for (int i = 0; i < num_rows; i++)
-            spectrogram[$"{i}, :"] = 10 * Numpy.np.log10(Numpy.np.abs(Numpy.np.fft.fftshift(Numpy.np.fft.fft_(samples[$"{i * fft_size}:{(i + 1) * fft_size}"]))).pow(2));
+        // for (int i = 0; i < num_rows; i++)
+        //     spectrogram[$"{i}, :"] = 10 * Numpy.np.log10(Numpy.np.abs(Numpy.np.fft.fftshift(Numpy.np.fft.fft_(samples[$"{i * fft_size}:{(i + 1) * fft_size}"]))).pow(2));
 
-        double CenterFreqinMHz = _configuration.CenterFrequency / 1e6;
+        // double CenterFreqinMHz = _configuration.CenterFrequency / 1e6;
 
-        var lengthValues = values.Length;
-        var lengthAbsFreqs = samples.len;
+        // var lengthValues = values.Length;
+        // var lengthAbsFreqs = samples.len;
 
-        int numRows = spectrogram.shape[0];
-        int numCols = spectrogram.shape[1];
-        // double[] flat = spectrogram.GetData<double>();
-        // double[,] spectrogramArray = new double[numRows, numCols];
-        // for (int i = 0; i < numRows; i++)
-        //     for (int j = 0; j < numCols; j++)
-        //         spectrogramArray[i, j] = flat[i * numCols + j];
-        var power = spectrogram["-1"].real.GetData<double>();
-        var left = CenterFreqinMHz + _configuration.SampleFrequency / (-2.0) / 1e6;
-        var right = CenterFreqinMHz + _configuration.SampleFrequency / 2.0 / 1e6;
-        //var bottom = 0;
-        //var top = samples.len / ((double)_configuration.SampleFrequency / 1e6);
-        double[] freq = Numpy.np.arange(left, right, (right - left) / spectrogram["-1"].len).GetData<double>();
+        // int numRows = spectrogram.shape[0];
+        // int numCols = spectrogram.shape[1];
+        // // double[] flat = spectrogram.GetData<double>();
+        // // double[,] spectrogramArray = new double[numRows, numCols];
+        // // for (int i = 0; i < numRows; i++)
+        // //     for (int j = 0; j < numCols; j++)
+        // //         spectrogramArray[i, j] = flat[i * numCols + j];
+        // var power = spectrogram["-1"].real.GetData<double>();
+        // var left = CenterFreqinMHz + _configuration.SampleFrequency / (-2.0) / 1e6;
+        // var right = CenterFreqinMHz + _configuration.SampleFrequency / 2.0 / 1e6;
+        // //var bottom = 0;
+        // //var top = samples.len / ((double)_configuration.SampleFrequency / 1e6);
+        // double[] freq = Numpy.np.arange(left, right, (right - left) / spectrogram["-1"].len).GetData<double>();
 
 
-        _ = _dispatcherQueue.TryEnqueue(() =>
-        {
-            _plotModulation.Clear();
-            _plotModulation.Add.SignalXY(freq, power);
-            _plotModulation.XLabel("Frequency (Hz)");
-            _plotModulation.YLabel("Power");
-            _plotModulation.Axes.SetLimitsX(left, right);
+        // _ = _dispatcherQueue.TryEnqueue(() =>
+        // {
+        //     _plotModulation.Clear();
+        //     _plotModulation.Add.SignalXY(freq, power);
+        //     _plotModulation.XLabel("Frequency (Hz)");
+        //     _plotModulation.YLabel("Power");
+        //     _plotModulation.Axes.SetLimitsX(left, right);
 
-            PixelPadding padding = new(50, 20, 30, 5);
-            _plotModulation.Layout.Fixed(padding);
-            _plotModulation.Axes.AutoScale();
-        });
+        //     PixelPadding padding = new(50, 20, 30, 5);
+        //     _plotModulation.Layout.Fixed(padding);
+        //     _plotModulation.Axes.AutoScale();
+        // });
     }
 }
 
