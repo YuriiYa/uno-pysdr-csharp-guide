@@ -109,6 +109,12 @@ public static class PalConstants
     /// <summary>PAL composite video bandwidth: 5.5 MHz.</summary>
     public const double PAL_VIDEO_BANDWIDTH = 5.5e6;
 
+    /// <summary>
+    /// Active video duration per PAL line: 64 µs total − 12 µs blanking = 52 µs.
+    /// Blanking = front porch (1.5 µs) + H-sync (4.7 µs) + back porch (5.8 µs) = 12 µs.
+    /// </summary>
+    public const double ActiveLineSeconds = 52e-6;
+
     // ── FIR filter tap lengths ────────────────────────────────────────────────
     /// <summary>
     /// Tap count for the luma low-pass FIR. Keep equal to <see cref="ChromaSeparationTaps"/>

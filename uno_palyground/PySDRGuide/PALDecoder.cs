@@ -265,7 +265,7 @@ public class PALDecoder
         int autoHOffset = _horizontalAligner.EstimateOffset(videoSignal, frameStart, samplesPerLine, sampleRate);
         int skipUntil = frameStart + autoHOffset;
 
-        var nonVideoData = (int)Math.Round((1.5 + 4.7 + 5.8) * 1e-6 * sampleRate);
+        var nonVideoData = (int)Math.Round((PalConstants.FrontPorchSeconds + PalConstants.HSyncSeconds + PalConstants.BackPorchSeconds) * sampleRate);
         // TODO: check the correctness: delta calculation mixes blanking intervals in a non-obvious way; verify against actual broadcast timing
         var delta = (samplesPerLine - nonVideoData) / 2 + nonVideoData;
         if (skipUntil < 0) skipUntil = 0;
@@ -292,8 +292,8 @@ public class PALDecoder
         }
 
         double[] frameData = new double[samplesPerFrame];
-        int preActiveWidth = (int)Math.Round(52e-6 * sampleRate);
-        int preDesiredActiveCol = (int)Math.Round((4.7 + 5.8) * 1e-6 * sampleRate);
+        int preActiveWidth = (int)Math.Round(PalConstants.ActiveLineSeconds * sampleRate);
+        int preDesiredActiveCol = (int)Math.Round((PalConstants.HSyncSeconds + PalConstants.BackPorchSeconds) * sampleRate);
         int copyWidth = Math.Max(preActiveWidth, Math.Max(0, samplesPerLine - preDesiredActiveCol));
         int activeLinesPerField = PalConstants.PAL_VISIBLE_LINES / 2; // 288
 
