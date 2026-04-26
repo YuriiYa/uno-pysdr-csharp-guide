@@ -11,7 +11,7 @@ public class FrameSynchronizer
             return 0;
         }
 
-        int searchLength = Math.Min(videoSignal.Length, Math.Max(sampleRate / 4, samplesPerLine * PALDecoder.PAL_LINES_PER_FRAME));
+        int searchLength = Math.Min(videoSignal.Length, Math.Max(sampleRate / 4, samplesPerLine * PalConstants.PAL_LINES_PER_FRAME));
         var segment = LightLowPass(videoSignal.Take(searchLength).ToArray());
 
         (double segMin, double segMax) = MinMax(segment);
@@ -85,7 +85,7 @@ public class FrameSynchronizer
             if (lineStart + backPorchToBurst + burstLenSamples >= video.Length) break;
 
             int burstStart = lineStart + backPorchToBurst;
-            double p = GoertzelPower(video, burstStart, burstLenSamples, PALDecoder.PAL_COLOR_CARRIER_FREQ, sampleRate);
+            double p = GoertzelPower(video, burstStart, burstLenSamples, PalConstants.PAL_COLOR_CARRIER_FREQ, sampleRate);
             candidates.Add((ln, p));
         }
         if (candidates.Count == 0) return vsyncFirstBroadStart + (int)Math.Round(PalConstants.VbiLinesToActiveVideo * samplesPerLine);

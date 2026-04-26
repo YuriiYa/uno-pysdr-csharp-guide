@@ -90,6 +90,16 @@ public static class PalConstants
     /// </summary>
     public const double LumaCutoffNyquistMargin = 0.45;
 
+    // ── PAL frame / line geometry ────────────────────────────────────────────
+    /// <summary>PAL standard: 625 lines per full interlaced frame (two fields).</summary>
+    public const int PAL_LINES_PER_FRAME = 625;
+
+    /// <summary>PAL standard: 576 active (visible) lines per frame (288 per field).</summary>
+    public const int PAL_VISIBLE_LINES = 576;
+
+    /// <summary>PAL color subcarrier frequency in Hz (4.43361875 MHz).</summary>
+    public const double PAL_COLOR_CARRIER_FREQ = 4_433_618.75;
+
     // ── ColorPLL ─────────────────────────────────────────────────────────────
     /// <summary>
     /// Time (seconds) from H-sync leading edge to the start of the color burst.

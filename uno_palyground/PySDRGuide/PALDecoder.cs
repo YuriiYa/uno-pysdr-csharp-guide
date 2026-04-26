@@ -2,10 +2,11 @@ using ScottPlot;
 using System.Numerics;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Collections.Concurrent;
 using Microsoft.UI.Dispatching;
 using uno_palyground.PySDRGuide;
 using System.Threading.Tasks;
-using System.Collections.Concurrent;
+using uno_palyground.PySDRGuide.Pipeline;
 
 // ## Abbreviations:
 // ADC: Analog-to-Digital Converter – digitizes incoming analog IF/baseband samples.
@@ -156,41 +157,7 @@ using System.Collections.Concurrent;
 // Each field has several lines that do not contain any picture information. These lines occur during the Vertical Blanking Interval (VBI) when the electron beam in the TV tube returns from the bottom to the top of the screen. The VBI also covers several lines which carry data such as Closed Captions and Teletext.
 // ITU-R BT.601-5 and 656-4 describe a digital active area. This is used when the analogue video signal is converted to a digital format, and it does not exactly coincide with the analogue active area.
 // detailed explanation of the format https://dvmp.co.uk/digital-video.htm
-public enum TvSystem { PAL_I, PAL_DK }
-
-public readonly record struct SystemProfile(
-    double LumaCutoffHz,
-    double ChromaLowHz,
-    double ChromaHighHz,
-    double AudioOffsetHz,
-    double VideoBandwidthHz
-)
-{
-    public static SystemProfile For(TvSystem s) => s switch
-    {
-        TvSystem.PAL_DK => new(
-            LumaCutoffHz: 5.0e6,        // keep luma safely below 6 MHz video BW
-            ChromaLowHz: 3.9e6,        // tighter around 4.4336 MHz
-            ChromaHighHz: 4.95e6,
-            AudioOffsetHz: 6.5e6,       // FM sound offset (awareness)
-            VideoBandwidthHz: 6.0e6
-        ),
-        TvSystem.PAL_I => new(
-            LumaCutoffHz: 4.8e6,
-            ChromaLowHz: 3.9e6,
-            ChromaHighHz: 4.95e6,
-            AudioOffsetHz: 6.0e6,
-            VideoBandwidthHz: 5.5e6
-        ),
-        _ => throw new ArgumentOutOfRangeException(nameof(s))
-    };
-}
-
-public enum FieldOrder
-{
-    TopFieldFirst,
-    BottomFieldFirst
-}
+// TvSystem, SystemProfile, FieldOrder are defined in Pipeline/PalTypes.cs
 
 public class PALDecoder
 {
@@ -235,43 +202,35 @@ public class PALDecoder
     private double[]? _lum1Active, _lum2Active;
     private double[]? _u1Active, _u2Active;
     private double[]? _v1Active, _v2Active;
-    // Filter / color separation reusable buffers
+    // Per-field parallel buffers (avoid contention when processing the two fields concurrently)
+    private double[]? _luminanceBufferF1;
+    private double[]? _chrominanceBufferF1;
+    private double[]? _luminanceBufferF2;
+    private double[]? _chrominanceBufferF2;
+    private double[]? _uFilteredF1;
+    private double[]? _vFilteredF1;
+    private double[]? _uFilteredF2;
+    private double[]? _vFilteredF2;
+    // Single-field legacy buffers (used by pre-parallel dead-code paths)
     private double[]? _luminanceBuffer;
     private double[]? _chrominanceBuffer;
     private double[]? _uScratch;
     private double[]? _vScratch;
     private double[]? _uFiltered;
     private double[]? _vFiltered;
-    // Per-field parallel buffers (avoid contention when processing the two fields concurrently)
-    private double[]? _luminanceBufferF1;
-    private double[]? _chrominanceBufferF1;
-    private double[]? _luminanceBufferF2;
-    private double[]? _chrominanceBufferF2;
-    private double[]? _uScratchF1;
-    private double[]? _vScratchF1;
-    private double[]? _uFilteredF1;
-    private double[]? _vFilteredF1;
-    private double[]? _uScratchF2;
-    private double[]? _vScratchF2;
-    private double[]? _uFilteredF2;
-    private double[]? _vFilteredF2;
-    // Reversed filter cache for SIMD FIR (stores reversed copies to enable forward vector dot products)
-    private static class FilterReverseCache
-    {
-        // ConditionalWeakTable is thread-safe but Add can race if we do a TryGet+Add pattern.
-        // Use GetValue factory which is atomic per key.
-        private static readonly ConditionalWeakTable<double[], double[]> Reverse = new();
-        public static double[] Get(double[] filter)
-        {
-            return Reverse.GetValue(filter, static f =>
-            {
-                var r = (double[])f.Clone();
-                Array.Reverse(r);
-                return r;
-            });
-        }
-    }
-    private static double[] GetReversedFilter(double[] filter) => FilterReverseCache.Get(filter);
+
+    // Pipeline stages (lazy-initialized per sample rate)
+    private IqDemodulator? _iqDemodulator;
+    private FrameSynchronizer? _frameSynchronizer;
+    private HorizontalAligner? _horizontalAligner;
+    private FieldSplitter? _fieldSplitter;
+    private LumaChromaSeparator? _lumaSeparatorF1;
+    private LumaChromaSeparator? _lumaSeparatorF2;
+    private ChromaDecoder? _chromaDecoderF1;
+    private ChromaDecoder? _chromaDecoderF2;
+    private ActiveAreaCropper? _activeAreaCropper;
+    private YuvToRgbConverter? _yuvToRgbConverter;
+    private FieldInterleaver? _fieldInterleaver;
 
     // Profiling accumulators (ticks)
     private long _ticksFieldCopy;
@@ -289,6 +248,13 @@ public class PALDecoder
             buffer = new double[requiredLength];
     }
 
+    private static double[] GetReversedFilter(double[] filter)
+    {
+        var rev = new double[filter.Length];
+        for (int i = 0; i < filter.Length; i++) rev[i] = filter[filter.Length - 1 - i];
+        return rev;
+    }
+
     private static void EnsureRgbBuffer(ref byte[,,]? buffer, int height, int width)
     {
         if (buffer == null || buffer.GetLength(0) != height || buffer.GetLength(1) != width)
@@ -298,8 +264,6 @@ public class PALDecoder
     // Legacy entry point retained for convenience; delegates to Stream overload.
     public void DecodePALSignal(int sampleRate, FileStream fs) => DecodePALSignal(sampleRate, (Stream)fs);
 
-    // New generic Stream variant. If the stream is not a FileStream (e.g. live HackRF),
-    // frame count is unknown and decoding proceeds until reads fail.
     public void DecodePALSignal(int sampleRate, Stream stream)
     {
         int samplesPerLine = (int)(PAL_LINE_DURATION * sampleRate);
@@ -309,32 +273,40 @@ public class PALDecoder
 
         if (isFile)
         {
-            // Configure ring buffer only for file-based replay.
             try { IQWavReader.ConfigureRingBuffer(samplesPerFrame * 2); } catch { /* ignore */ }
         }
 
+        // Lazy-initialize pipeline stages
+        _iqDemodulator ??= new IqDemodulator();
+        _frameSynchronizer ??= new FrameSynchronizer();
+        _horizontalAligner ??= new HorizontalAligner();
+        _fieldSplitter ??= new FieldSplitter();
+        _activeAreaCropper ??= new ActiveAreaCropper();
+        _yuvToRgbConverter ??= new YuvToRgbConverter();
+        _fieldInterleaver ??= new FieldInterleaver();
+
         double[] videoSignal = new double[samplesPerFrame];
-        if (!ReadAndDemodFrame(stream, samplesPerFrame, videoSignal))
+        if (!_iqDemodulator.TryRead(stream, samplesPerFrame, videoSignal))
         {
             Console.WriteLine("No samples available for PAL decoding (initial frame).");
             return;
         }
-        int frameStart = FindFrameStart(videoSignal, sampleRate, samplesPerLine);
-        int autoHOffset = EstimateHorizontalOffset(videoSignal, frameStart, samplesPerLine, sampleRate);
+        int frameStart = _frameSynchronizer.FindFrameStart(videoSignal, sampleRate, samplesPerLine);
+        int autoHOffset = _horizontalAligner.EstimateOffset(videoSignal, frameStart, samplesPerLine, sampleRate);
         int skipUntil = frameStart + autoHOffset;
 
         var nonVideoData = (int)Math.Round((1.5 + 4.7 + 5.8) * 1e-6 * sampleRate);
+        // TODO: check the correctness: delta calculation mixes blanking intervals in a non-obvious way; verify against actual broadcast timing
         var delta = (samplesPerLine - nonVideoData) / 2 + nonVideoData;
         if (skipUntil < 0) skipUntil = 0;
         if (skipUntil > samplesPerFrame) skipUntil = samplesPerFrame;
 
-        // Advance / discard alignment samples.
-        SkipSamplesStreamingGeneric(stream, skipUntil+delta);
+        SkipSamplesStreamingGeneric(stream, skipUntil + delta);
 
         long numberOfFrames;
         if (isFile)
         {
-            long remainingComplexSamples = (file!.Length - file.Position) / 4; // assumes 4 bytes per complex sample in file path
+            long remainingComplexSamples = (file!.Length - file.Position) / 4;
             numberOfFrames = remainingComplexSamples / samplesPerFrame;
             if (numberOfFrames <= 0)
             {
@@ -345,19 +317,16 @@ public class PALDecoder
         }
         else
         {
-            numberOfFrames = long.MaxValue; // continuous
+            numberOfFrames = long.MaxValue;
             Console.WriteLine("Decoding continuous stream (unknown frame count)...");
         }
 
         double[] frameData = new double[samplesPerFrame];
-        // Precompute active-width parameters (constant across frames for given sampleRate)
         int preActiveWidth = (int)Math.Round(52e-6 * sampleRate);
         int preDesiredActiveCol = (int)Math.Round((4.7 + 5.8) * 1e-6 * sampleRate);
-        // replicate original CropToActive copyWidth logic
         int copyWidth = Math.Max(preActiveWidth, Math.Max(0, samplesPerLine - preDesiredActiveCol));
         int activeLinesPerField = PAL_VISIBLE_LINES / 2; // 288
 
-        // Ensure active buffers once (size: lines * copyWidth)
         int activeBufferLenPerField = activeLinesPerField * copyWidth;
         EnsureBuffer(ref _lum1Active, activeBufferLenPerField);
         EnsureBuffer(ref _lum2Active, activeBufferLenPerField);
@@ -373,158 +342,101 @@ public class PALDecoder
             {
                 Console.WriteLine($"Decoding frame {frameIndex + 1}/{numberOfFrames}...");
                 long frameFieldCopyTicks = 0, frameLumaChromaTicks = 0, frameChromaDecodeTicks = 0, frameCropTicks = 0, frameRgbTicks = 0, frameInterleaveTicks = 0;
-                // For continuous live sources, discard backlog to minimize latency.
+
                 if (!isFile && stream is HackRF.Namespace.TeeIqStream tee)
                 {
-                    tee.DrainToLatestFrame(samplesPerFrame * 2); // raw bytes (I,Q int8) per frame
+                    tee.DrainToLatestFrame(samplesPerFrame * 2);
                 }
-                if (!ReadAndDemodFrame(stream, samplesPerFrame, frameData))
+                if (!_iqDemodulator.TryRead(stream, samplesPerFrame, frameData))
                 {
                     Console.WriteLine($"Short read at frame {frameIndex}; expected {samplesPerFrame} samples. Stopping.");
                     return (breakResult: true, continueResult: false);
                 }
 
-                // Separate fields
-                int fieldLines = PAL_VISIBLE_LINES / 2; // 288
-                                                        // After you fill frameData with exactly one PAL frame (625 lines worth) OR one visible frame window,
-                                                        // split fields as contiguous blocks, not every-other-line.
-                int linesPerFieldAll = PAL_LINES_PER_FRAME / 2;   // 312
-                int fieldLinesVis = PAL_VISIBLE_LINES / 2;        // 288
-
-                // If frameStart already points to Field-1 active top, use 0 and +linesPerFieldAll.
-                // Otherwise add per-field VBI offsets (~22–25 lines) to land on active video:
-                // const int VBI_LINES_FIELD1 = 23;
-                // const int VBI_LINES_FIELD2 = 23;
-
-                // Choose one of the two strategies:
-
-                // Strategy A: frameData starts at Field-1 active line 0
-                int field1StartLine = 0;
-                int field2StartLine = linesPerFieldAll;
-
-                // Strategy B: frameData starts at the very beginning of the frame (includes VBI)
-                //int field1StartLine = VBI_LINES_FIELD1;
-                //int field2StartLine = linesPerFieldAll + VBI_LINES_FIELD2;
-
-                int fieldSamples = fieldLines * samplesPerLine; // contiguous samples per field (visible portion)
+                long t0 = Stopwatch.GetTimestamp();
+                int fieldSamples = activeLinesPerField * samplesPerLine;
                 EnsureBuffer(ref _field1Buffer, fieldSamples);
                 EnsureBuffer(ref _field2Buffer, fieldSamples);
-                var field1 = _field1Buffer!;
-                var field2 = _field2Buffer!;
-
-                int availableLines = frameData.Length / samplesPerLine;
-                if (availableLines < (field2StartLine + fieldLinesVis))
+                if (!_fieldSplitter!.TrySplit(frameData, samplesPerLine, _field1Buffer!, _field2Buffer!))
                 {
-                    Console.WriteLine($"Frame {frameIndex}: insufficient lines (available={availableLines}) for expected second field start {field2StartLine}. Skipping frame.");
+                    Console.WriteLine($"Frame {frameIndex}: insufficient lines for field split. Skipping frame.");
                     return (breakResult: false, continueResult: true);
                 }
-                // Copy each field as a single contiguous block (eliminates per-line loop & allocations)
-                // Visible lines are already contiguous for each field given strategy A
-                int srcField1OffsetSamples = field1StartLine * samplesPerLine;
-                int srcField2OffsetSamples = field2StartLine * samplesPerLine;
-                int copySamples = fieldLinesVis * samplesPerLine;
-                int bytesToCopy = copySamples * sizeof(double);
-                long t0 = Stopwatch.GetTimestamp();
-                if (srcField1OffsetSamples + copySamples <= frameData.Length)
-                    Buffer.BlockCopy(frameData, srcField1OffsetSamples * sizeof(double), field1, 0, bytesToCopy);
-                if (srcField2OffsetSamples + copySamples <= frameData.Length)
-                    Buffer.BlockCopy(frameData, srcField2OffsetSamples * sizeof(double), field2, 0, bytesToCopy);
                 long t1 = Stopwatch.GetTimestamp();
                 frameFieldCopyTicks = t1 - t0;
-                // Pre-warm filters once (outside parallel region) to avoid dictionary races
-                double lumaCutoff = Math.Min(_profile.LumaCutoffHz, 0.45 * sampleRate);
-                var lumaFilter = CreateLowPassFilter(lumaCutoff, sampleRate, LUMA_LPF_TAPS);
-                double chromaLow = _profile.ChromaLowHz;
-                double chromaHigh = _profile.ChromaHighHz;
-                var chromaFilter = CreateBandPassFilter(chromaLow, chromaHigh, sampleRate, CHROMA_SEPARATION_TAPS);
-                var chromaLPF = CreateLowPassFilter(1.3e6, sampleRate, CHROMA_BASEBAND_LPF_TAPS);
 
-                // Process each field in parallel: luma/chroma separation + chroma decode
-                double[]? lum1 = null, chr1 = null, u1 = null, v1 = null;
-                double[]? lum2 = null, chr2 = null, u2 = null, v2 = null;
+                var field1 = _field1Buffer!;
+                var field2 = _field2Buffer!;
+                double[]? lum1 = null, u1 = null, v1 = null;
+                double[]? lum2 = null, u2 = null, v2 = null;
+
+                // Lazy-initialize per-field separator and decoder pairs
+                _lumaSeparatorF1 ??= new LumaChromaSeparator(_profile, sampleRate, LUMA_LPF_TAPS, CHROMA_SEPARATION_TAPS);
+                _lumaSeparatorF2 ??= new LumaChromaSeparator(_profile, sampleRate, LUMA_LPF_TAPS, CHROMA_SEPARATION_TAPS);
+                _chromaDecoderF1 ??= new ChromaDecoder(sampleRate, CHROMA_BASEBAND_LPF_TAPS);
+                _chromaDecoderF2 ??= new ChromaDecoder(sampleRate, CHROMA_BASEBAND_LPF_TAPS);
 
                 t0 = Stopwatch.GetTimestamp();
                 Parallel.Invoke(
                     () =>
                     {
-                        // Field 1 luma/chroma
                         int len1 = field1.Length;
                         EnsureBuffer(ref _luminanceBufferF1, len1);
                         EnsureBuffer(ref _chrominanceBufferF1, len1);
-                        ApplyTwoFiltersStaticToDest(field1, lumaFilter, chromaFilter, _luminanceBufferF1!, _chrominanceBufferF1!);
-                        lum1 = _luminanceBufferF1!; chr1 = _chrominanceBufferF1!;
-                        // Fused chroma demod+LPF field 1
-                        EnsureBuffer(ref _uScratchF1, len1);
-                        EnsureBuffer(ref _vScratchF1, len1);
+                        _lumaSeparatorF1!.Separate(field1, _luminanceBufferF1!, _chrominanceBufferF1!);
+                        lum1 = _luminanceBufferF1!;
                         EnsureBuffer(ref _uFilteredF1, len1);
                         EnsureBuffer(ref _vFilteredF1, len1);
-                        var revLPF = GetReversedFilter(chromaLPF);
-                        FusedChromaDemodAndFilter(chr1!, sampleRate, samplesPerLine, field1StartLine, chromaLPF, revLPF, _uScratchF1!, _vScratchF1!, _uFilteredF1!, _vFilteredF1!);
+                        _chromaDecoderF1!.Decode(_chrominanceBufferF1!, sampleRate, samplesPerLine, 0, _uFilteredF1!, _vFilteredF1!);
                         u1 = _uFilteredF1!; v1 = _vFilteredF1!;
                     },
                     () =>
                     {
-                        // Field 2 luma/chroma
                         int len2 = field2.Length;
                         EnsureBuffer(ref _luminanceBufferF2, len2);
                         EnsureBuffer(ref _chrominanceBufferF2, len2);
-                        ApplyTwoFiltersStaticToDest(field2, lumaFilter, chromaFilter, _luminanceBufferF2!, _chrominanceBufferF2!);
-                        lum2 = _luminanceBufferF2!; chr2 = _chrominanceBufferF2!;
-                        // Fused chroma demod+LPF field 2
-                        EnsureBuffer(ref _uScratchF2, len2);
-                        EnsureBuffer(ref _vScratchF2, len2);
+                        _lumaSeparatorF2!.Separate(field2, _luminanceBufferF2!, _chrominanceBufferF2!);
+                        lum2 = _luminanceBufferF2!;
                         EnsureBuffer(ref _uFilteredF2, len2);
                         EnsureBuffer(ref _vFilteredF2, len2);
-                        var revLPF2 = GetReversedFilter(chromaLPF);
-                        FusedChromaDemodAndFilter(chr2!, sampleRate, samplesPerLine, field2StartLine, chromaLPF, revLPF2, _uScratchF2!, _vScratchF2!, _uFilteredF2!, _vFilteredF2!);
+                        _chromaDecoderF2!.Decode(_chrominanceBufferF2!, sampleRate, samplesPerLine, PAL_LINES_PER_FRAME / 2, _uFilteredF2!, _vFilteredF2!);
                         u2 = _uFilteredF2!; v2 = _vFilteredF2!;
                     }
                 );
                 t1 = Stopwatch.GetTimestamp();
-                // The combined time includes both luma/chroma and chroma decode for both fields due to parallel execution.
-                // Attribute proportionally: keep prior profiling buckets (split roughly by previous ratio) to retain stage visibility.
                 long combined = t1 - t0;
-                // Estimate split using previous frame's proportion if available; fallback 60/40 (sep/decode)
                 double prevSep = _ticksLumaChroma > 0 && _ticksChromaDecode > 0 ? _ticksLumaChroma : 6;
                 double prevChroma = _ticksChromaDecode > 0 ? _ticksChromaDecode : 4;
                 double totalPrev = prevSep + prevChroma;
                 frameLumaChromaTicks = (long)(combined * (prevSep / totalPrev));
                 frameChromaDecodeTicks = combined - frameLumaChromaTicks;
 
-                // Assign refs for downstream steps
-                var lum1Ref = lum1!; var lum2Ref = lum2!; var u1Ref = u1!; var v1Ref = v1!; var u2Ref = u2!; var v2Ref = v2!;
-
-
-                // OPTIONAL: crop Y/U/V after decode (safe; burst already used)
-                //    var activeWidth = samplesPerLine;
                 t0 = Stopwatch.GetTimestamp();
-                CropToActiveInto(lum1Ref, samplesPerLine, sampleRate, _lum1Active!, copyWidth);
-                CropToActiveInto(u1Ref, samplesPerLine, sampleRate, _u1Active!, copyWidth);
-                CropToActiveInto(v1Ref, samplesPerLine, sampleRate, _v1Active!, copyWidth);
-                CropToActiveInto(lum2Ref, samplesPerLine, sampleRate, _lum2Active!, copyWidth);
-                CropToActiveInto(u2Ref, samplesPerLine, sampleRate, _u2Active!, copyWidth);
-                CropToActiveInto(v2Ref, samplesPerLine, sampleRate, _v2Active!, copyWidth);
+                _activeAreaCropper!.CropInto(lum1!, samplesPerLine, _lum1Active!, copyWidth);
+                _activeAreaCropper!.CropInto(u1!, samplesPerLine, _u1Active!, copyWidth);
+                _activeAreaCropper!.CropInto(v1!, samplesPerLine, _v1Active!, copyWidth);
+                _activeAreaCropper!.CropInto(lum2!, samplesPerLine, _lum2Active!, copyWidth);
+                _activeAreaCropper!.CropInto(u2!, samplesPerLine, _u2Active!, copyWidth);
+                _activeAreaCropper!.CropInto(v2!, samplesPerLine, _v2Active!, copyWidth);
                 t1 = Stopwatch.GetTimestamp();
                 frameCropTicks = t1 - t0;
                 int activeWidth = copyWidth;
 
-                // Convert each field (use activeWidth as samplesPerLine)
-                int fieldHeight = activeLinesPerField; // lum1Active lines
+                int fieldHeight = activeLinesPerField;
                 EnsureRgbBuffer(ref _rgbField1Buffer, fieldHeight, activeWidth);
                 EnsureRgbBuffer(ref _rgbField2Buffer, fieldHeight, activeWidth);
                 var rgbField1 = _rgbField1Buffer!;
                 var rgbField2 = _rgbField2Buffer!;
                 t0 = Stopwatch.GetTimestamp();
-                ConvertYUVToRGB_BT601_OptimizedInto(_lum1Active!, _u1Active!, _v1Active!, activeWidth, rgbField1);
-                ConvertYUVToRGB_BT601_OptimizedInto(_lum2Active!, _u2Active!, _v2Active!, activeWidth, rgbField2);
+                _yuvToRgbConverter!.Convert(_lum1Active!, _u1Active!, _v1Active!, activeWidth, rgbField1);
+                _yuvToRgbConverter!.Convert(_lum2Active!, _u2Active!, _v2Active!, activeWidth, rgbField2);
                 t1 = Stopwatch.GetTimestamp();
                 frameRgbTicks = t1 - t0;
 
-                // Interleave fields for display into reusable frame buffer
                 int finalHeight = Math.Min(PAL_VISIBLE_LINES, fieldHeight * 2);
                 EnsureRgbBuffer(ref _rgbInterleavedFrameBuffer, finalHeight, activeWidth);
                 t0 = Stopwatch.GetTimestamp();
-                InterleaveFieldsInto(rgbField1, rgbField2, _rgbInterleavedFrameBuffer!);
+                _fieldInterleaver!.Interleave(rgbField1, rgbField2, _rgbInterleavedFrameBuffer!, _fieldOrder);
                 t1 = Stopwatch.GetTimestamp();
                 frameInterleaveTicks = t1 - t0;
                 rgbFrame = _rgbInterleavedFrameBuffer;
@@ -553,7 +465,7 @@ public class PALDecoder
             if (rgbFrame == null)
             {
                 Console.WriteLine($"Frame {frameIndex}: failed to interleave fields.");
-                continue; // short read or error
+                continue;
             }
 
             DisplayVideoFrame(rgbFrame);
@@ -564,59 +476,6 @@ public class PALDecoder
                 break;
             }
         }
-    }
-
-    // Streaming reader + AM magnitude demodulation into provided buffer.
-    // Returns false if EOF before filling buffer.
-    private bool ReadAndDemodFrame(Stream source, int samplesPerFrame, double[] frameBuffer)
-    {
-        int filled = 0;
-        double sum = 0;
-        while (filled < samplesPerFrame)
-        {
-            int need = samplesPerFrame - filled;
-            if (source is FileStream fsrc)
-            {
-                var seg = IQWavReader.ReadIQIntoRingOptimized(fsrc, need);
-                if (seg.IsEmpty) break; // EOF
-                var first = seg.First;
-                for (int i = 0; i < first.Length; i++)
-                {
-                    double mag = first[i].Magnitude;
-                    frameBuffer[filled++] = mag;
-                    sum += mag;
-                }
-                var second = seg.Second;
-                for (int i = 0; i < second.Length && filled < samplesPerFrame; i++)
-                {
-                    double mag = second[i].Magnitude;
-                    frameBuffer[filled++] = mag;
-                    sum += mag;
-                }
-            }
-            else
-            {
-                // Fallback continuous stream reader: assume int8 I,Q interleaved.
-                const int bytesPerSample = 2; // I + Q (signed 8-bit)
-                int bytesNeeded = need * bytesPerSample;
-                byte[] tmp = new byte[Math.Min(bytesNeeded, 8192)];
-                int read = source.Read(tmp, 0, tmp.Length);
-                if (read <= 0) break;
-                int samplesRead = read / bytesPerSample;
-                for (int s = 0; s < samplesRead && filled < samplesPerFrame; s++)
-                {
-                    double iVal = (sbyte)tmp[2 * s] / 128.0;
-                    double qVal = (sbyte)tmp[2 * s + 1] / 128.0;
-                    double mag = Math.Sqrt(iVal * iVal + qVal * qVal);
-                    frameBuffer[filled++] = mag;
-                    sum += mag;
-                }
-            }
-        }
-        if (filled < samplesPerFrame) return false;
-        double dc = sum / samplesPerFrame;
-        for (int i = 0; i < samplesPerFrame; i++) frameBuffer[i] -= dc;
-        return true;
     }
 
     private static void SkipSamplesStreaming(FileStream fs, int samplesToSkip)

@@ -42,6 +42,7 @@
     <PackageReference Include="ScottPlot.WinUI" />
     <PackageReference Include="Spectrogram" />
     <ProjectReference Include="..\NetHackRF\NetHackrf.csproj" />
+    <ProjectReference Include="..\PALDecoder.Pipeline\PALDecoder.Pipeline.csproj" />
   </ItemGroup>
 
 </Project>

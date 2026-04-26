@@ -1,8 +1,7 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
-using uno_palyground.PySDRGuide.Pipeline;
 
-namespace uno_palyground.PySDRGuide;
+namespace uno_palyground.PySDRGuide.Pipeline;
 
 public class ColorPll
 {
@@ -10,7 +9,7 @@ public class ColorPll
     private readonly double _burstStartTime;
     private readonly double _burstDuration;
 
-    private double _frequency = PALDecoder.PAL_COLOR_CARRIER_FREQ;
+    private double _frequency = PalConstants.PAL_COLOR_CARRIER_FREQ;
     private double _phaseErrorIntegrator = 0.0;
     private double _phaseIncrement;
     private Complex _osc = Complex.One;
@@ -56,7 +55,7 @@ public class ColorPll
             double phaseError = (chromaSample * Complex.Conjugate(burstReference)).Phase;
 
             _phaseErrorIntegrator += phaseError * PalConstants.PllIntegralGain;
-            _frequency = PALDecoder.PAL_COLOR_CARRIER_FREQ + phaseError * PalConstants.PllProportionalGain + _phaseErrorIntegrator;
+            _frequency = PalConstants.PAL_COLOR_CARRIER_FREQ + phaseError * PalConstants.PllProportionalGain + _phaseErrorIntegrator;
             UpdatePhaseIncrement();
         }
         StepOscillator();
