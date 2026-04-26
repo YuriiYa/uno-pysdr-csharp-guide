@@ -9,15 +9,11 @@ public class YuvToRgbConverter
         int height = Math.Min(destHeight, y.Length / samplesPerLine);
         int width = Math.Min(destWidth, samplesPerLine);
 
-        // BT.601 YUV→RGB matrix coefficients (full-range, R′G′B′ = Y′ + matrix × [U, V])
-        // c_rv: V → R contribution  (R = Y + 1.402 * V)
-        // c_gu: U → G contribution  (G = Y − 0.344 * U − 0.714 * V)
-        // c_gv: V → G contribution
-        // c_bu: U → B contribution  (B = Y + 1.772 * U)
-        const double c_rv = 1.402;
-        const double c_gu = -0.344;
-        const double c_gv = -0.714;
-        const double c_bu = 1.772;
+        // BT.601 YUV→RGB matrix coefficients — see PalConstants.Bt601C*
+        double c_rv = PalConstants.Bt601Crv;
+        double c_gu = PalConstants.Bt601Cgu;
+        double c_gv = PalConstants.Bt601Cgv;
+        double c_bu = PalConstants.Bt601Cbu;
 
         for (int row = 0; row < height; row++)
         {

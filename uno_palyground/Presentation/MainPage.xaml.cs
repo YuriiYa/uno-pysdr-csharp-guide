@@ -139,8 +139,8 @@ public sealed partial class MainPage : Page
 
         // Decode PAL signal (assuming 10 MHz sample rate)
         // Ring buffer size: 2 frames worth (approx). Reserve after reading header so we know sample rate.
-        int samplesPerLine = (int)(PALDecoder.PAL_LINE_DURATION * 10000000);
-        int samplesPerFrame = samplesPerLine * PALDecoder.PAL_LINES_PER_FRAME;
+        int samplesPerLine = (int)(PalConstants.PAL_LINE_DURATION * 10000000);
+        int samplesPerFrame = samplesPerLine * PalConstants.PAL_LINES_PER_FRAME;
         uno_palyground.PySDRGuide.IQWavReader.ConfigureRingBuffer(samplesPerFrame * 2);
 
         TimeLapseHelper.PrintTime(() =>

@@ -6,6 +6,7 @@ global using Microsoft.Extensions.Logging;
 global using Microsoft.Extensions.Options;
 global using uno_palyground.Models;
 global using uno_palyground.Presentation;
+global using uno_palyground.PySDRGuide.Pipeline;
 global using ApplicationExecutionState = Windows.ApplicationModel.Activation.ApplicationExecutionState;
 global using CommunityToolkit.Mvvm.ComponentModel;
 global using CommunityToolkit.Mvvm.Input;

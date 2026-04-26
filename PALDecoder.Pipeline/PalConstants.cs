@@ -97,8 +97,47 @@ public static class PalConstants
     /// <summary>PAL standard: 576 active (visible) lines per frame (288 per field).</summary>
     public const int PAL_VISIBLE_LINES = 576;
 
+    /// <summary>PAL standard frame rate: 25 frames per second.</summary>
+    public const double PAL_FRAME_RATE = 25.0;
+
+    /// <summary>Nominal duration of one PAL line: 64 µs.</summary>
+    public const double PAL_LINE_DURATION = 64e-6;
+
     /// <summary>PAL color subcarrier frequency in Hz (4.43361875 MHz).</summary>
     public const double PAL_COLOR_CARRIER_FREQ = 4_433_618.75;
+
+    /// <summary>PAL composite video bandwidth: 5.5 MHz.</summary>
+    public const double PAL_VIDEO_BANDWIDTH = 5.5e6;
+
+    // ── FIR filter tap lengths ────────────────────────────────────────────────
+    /// <summary>
+    /// Tap count for the luma low-pass FIR. Keep equal to <see cref="ChromaSeparationTaps"/>
+    /// so the dual-filter single-pass path (<c>ApplyTwoFiltersStaticToDest</c>) is used.
+    /// Raise to 91/101 for better stop-band rejection; lower to 73 if CPU-bound.
+    /// </summary>
+    public const int LumaLpfTaps = 81;
+
+    /// <summary>
+    /// Tap count for the chroma band-pass FIR. Must equal <see cref="LumaLpfTaps"/> for
+    /// the single-pass dual-filter optimisation to activate.
+    /// </summary>
+    public const int ChromaSeparationTaps = 81;
+
+    /// <summary>Tap count for the post-demodulation chroma baseband low-pass FIR.</summary>
+    public const int ChromaBasebandLpfTaps = 63;
+
+    // ── BT.601 YUV → RGB coefficients ────────────────────────────────────────
+    /// <summary>BT.601: V → R channel contribution  (R = Y + 1.402·V).</summary>
+    public const double Bt601Crv = 1.402;
+
+    /// <summary>BT.601: U → G channel contribution  (G = Y − 0.344·U − 0.714·V).</summary>
+    public const double Bt601Cgu = -0.344;
+
+    /// <summary>BT.601: V → G channel contribution.</summary>
+    public const double Bt601Cgv = -0.714;
+
+    /// <summary>BT.601: U → B channel contribution  (B = Y + 1.772·U).</summary>
+    public const double Bt601Cbu = 1.772;
 
     // ── ColorPLL ─────────────────────────────────────────────────────────────
     /// <summary>
